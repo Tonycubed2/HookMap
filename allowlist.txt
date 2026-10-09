@@ -1,0 +1,17 @@
+# HookMap allowlist
+# One module name per line. Wildcards * and ? are allowed. Text after '|' is a note shown in the report.
+# Patches and conflicts that only involve allowlisted modules are marked "expected" and ranked lower.
+# Edit freely; no rebuild needed.
+
+skse64_*.dll            | SKSE core: hooks the game by design
+EngineFixes.dll         | SSE Engine Fixes: patches dozens of sites by design
+SSEDisplayTweaks.dll    | SSE Display Tweaks: frame timing and display patches
+po3_Tweaks.dll          | powerofthree's Tweaks: many small engine fixes
+ScrambledBugs.dll       | Scrambled Bugs: many small engine fixes
+PapyrusTweaks.dll       | Papyrus Tweaks NG: VM patches
+PrivateProfileRedirector.dll | INI redirector: hooks profile APIs by design
+CrashLogger.dll         | Crash Logger: installs exception handlers by design
+GameOverlayRenderer64.dll | Steam overlay
+DiscordHook64.dll       | Discord overlay
+RTSSHooks64.dll         | RivaTuner / Afterburner overlay
+graphics-hook64.dll     | OBS game capture

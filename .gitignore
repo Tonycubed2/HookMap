@@ -1,0 +1,13 @@
+# build output
+build/
+out/
+.vs/
+CMakeUserPresets.json
+
+# HookMap reports (may contain personal paths)
+HookMap_*.html
+HookMap_*.json
+HookMap_Diff_*.html
+
+# release zips
+*.zip
