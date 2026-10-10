@@ -34,7 +34,7 @@
 namespace hm
 {
     inline constexpr const char* kToolName = "HookMap";
-    inline constexpr const char* kToolVersion = "1.1.0";
+    inline constexpr const char* kToolVersion = "1.2.0";
 
     std::string  W2U(const std::wstring& w);
     std::wstring U2W(const std::string& s);

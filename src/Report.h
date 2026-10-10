@@ -56,6 +56,11 @@ namespace hm
         std::string chainStatus;
         std::vector<std::string> victims;
         std::vector<std::string> otherRefs;
+        // Evidence for a clobber/overlap: the earlier hook's trampoline that nothing reaches any more.
+        std::string stubAt;        // "Victim.dll trampoline at 0x... (private memory)"
+        std::string stubMatched;   // the original bytes found in it
+        std::string stubReturns;   // where it jumps back to
+        std::string evidenceKind;  // "clobber" / "overlap"
         std::string location;   // ID / name / vtable slot / export
         std::string Key() const;
     };

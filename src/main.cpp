@@ -32,6 +32,7 @@ namespace
         "                     With neither option, HookMap asks before scanning.\n"
         "  --no-system        skip scanning Windows DLLs (ntdll, dxgi, d3d11, ...) for overlay hooks\n"
         "  --no-open          don't open the HTML report when done\n"
+        "  --render FILE.json rebuild the HTML report from a saved JSON report\n"
         "  --help             this text\n"
         "\n"
         "Best results: run it with the game in a loaded save (some plugins only hook after a save loads).\n";
@@ -118,6 +119,26 @@ namespace
         return 0;
     }
 
+    int RunRender(const std::wstring& jsonPath, const Options& o)
+    {
+        Report r;
+        std::string text, err;
+        if (!ReadFileText(jsonPath, text) || !FromJson(text, r, err)) {
+            printf("Can't read %s: %s\n", W2U(jsonPath).c_str(), err.empty() ? "file not readable" : err.c_str());
+            return 2;
+        }
+        std::wstring out = jsonPath;
+        if (out.size() > 5 && IEquals(out.substr(out.size() - 5), L".json")) out.resize(out.size() - 5);
+        out += L"_rendered.html";
+        if (!WriteFileText(out, ToHtml(r))) {
+            printf("Can't write %s\n", W2U(out).c_str());
+            return 3;
+        }
+        printf("Report: %s\n", W2U(out).c_str());
+        if (!o.noOpen) OpenFile(out);
+        return 0;
+    }
+
     int RunScan(const Options& o)
     {
         DWORD pid = o.pid;
@@ -196,6 +217,7 @@ int wmain(int argc, wchar_t** argv)
 {
     SetConsoleOutputCP(CP_UTF8);
     Options o;
+    std::wstring render;
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i];
         auto next = [&](std::wstring& dst) {
@@ -208,6 +230,8 @@ int wmain(int argc, wchar_t** argv)
         } else if (a == L"--pid" && i + 1 < argc) {
             o.pid = (DWORD)wcstoul(argv[++i], nullptr, 10);
             o.rawArgs.push_back(argv[i]);
+        } else if (a == L"--render" && i + 1 < argc) {
+            render = argv[++i];
         } else if (a == L"--wait") o.wait = true;
         else if (a == L"--share") o.share = true;
         else if (a == L"--no-share") o.noShare = true;
@@ -232,7 +256,7 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
-    int rc = o.diffOld.empty() ? RunScan(o) : RunDiff(o);
+    int rc = !render.empty() ? RunRender(render, o) : (o.diffOld.empty() ? RunScan(o) : RunDiff(o));
     Pause(o);
     return rc;
 }

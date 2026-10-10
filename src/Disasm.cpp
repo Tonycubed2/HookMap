@@ -32,7 +32,11 @@ namespace hm
             return b;
         case 0xFF:
             if (n >= 6 && p[1] == 0x15) b = { BrKind::CallInd, 6, 0, addr + 6 + (int64_t)Rd32(p + 2) };
-            else if (n >= 6 && p[1] == 0x25) b = { BrKind::JmpInd, 6, 0, addr + 6 + (int64_t)Rd32(p + 2) };
+            else if (n >= 6 && p[1] == 0x25) {
+                // jmp [rip+0] ; dq target  is a 14-byte absolute jump; the pointer is part of the patch
+                int len = (Rd32(p + 2) == 0 && n >= 14) ? 14 : 6;
+                b = { BrKind::JmpInd, len, 0, addr + 6 + (int64_t)Rd32(p + 2) };
+            }
             return b;
         case 0x0F:
             if (n >= 6 && (p[1] & 0xF0) == 0x80) b = { BrKind::Jcc, 6, addr + 6 + (int64_t)Rd32(p + 2), 0 };

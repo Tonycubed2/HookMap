@@ -155,6 +155,10 @@ namespace hm
             w.S("chainStatus", p.chainStatus);
             w.L("victims", p.victims);
             w.L("otherRefs", p.otherRefs);
+            w.S("stubAt", p.stubAt);
+            w.S("stubMatched", p.stubMatched);
+            w.S("stubReturns", p.stubReturns);
+            w.S("evidenceKind", p.evidenceKind);
             w.S("location", p.location);
             w.Close('}');
         }
@@ -262,6 +266,10 @@ namespace hm
                 p.chainStatus = o.GetStr("chainStatus");
                 p.victims = o.GetStrList("victims");
                 p.otherRefs = o.GetStrList("otherRefs");
+                p.stubAt = o.GetStr("stubAt");
+                p.stubMatched = o.GetStr("stubMatched");
+                p.stubReturns = o.GetStr("stubReturns");
+                p.evidenceKind = o.GetStr("evidenceKind");
                 p.location = o.GetStr("location");
                 r.patches.push_back(std::move(p));
             }
@@ -405,6 +413,7 @@ tr:target td{background:var(--lowBg)}
 details.grp,details.mrec{background:var(--panel);border:1px solid var(--line);border-radius:10px;margin:8px 0}
 details.grp>summary,details.mrec>summary{cursor:pointer;padding:10px 14px;list-style:none;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline}
 details.grp>summary::-webkit-details-marker,details.mrec>summary::-webkit-details-marker{display:none}
+details>summary{cursor:pointer;list-style:none}details>summary::-webkit-details-marker{display:none}
 details>summary::before{content:"▸";color:var(--mute);margin-right:2px}details[open]>summary::before{content:"▾"}
 details.grp .tw{border:0;border-top:1px solid var(--line);border-radius:0 0 10px 10px}
 details.mrec:target{outline:2px solid var(--accent)}
@@ -552,22 +561,65 @@ ul.notes{margin:6px 0;padding-left:20px;color:var(--mute)}
                  "</span><span class=mute>" + std::to_string(list.size()) + " patch(es) · " + std::to_string(owners.size()) +
                  " owner(s)</span></summary><div class=tw><table><thead><tr><th>#</th><th>Location</th><th>Kind</th><th>Owner</th>"
                  "<th>Chain</th><th>Bytes (original → now)</th></tr></thead><tbody>";
-            for (auto p : list) {
+            auto row = [&](const PatchRec* p) {
                 bool bad = !p->victims.empty();
-                h += std::string("<tr class=\"f") + (bad ? " bad" : "") + "\" id=\"p-" + std::to_string(p->id) + "\">";
-                h += "<td class=mono>" + std::to_string(p->id) + "</td>";
-                h += "<td><div>" + E(p->location) + "</div><div class=\"mono mute\">+" + E(Hex(p->rva)) + "</div></td>";
-                h += "<td>" + E(p->kind) + (p->kindNote.empty() ? "" : "<div class=mute>" + E(p->kindNote) + "</div>") + "</td>";
-                h += "<td>" + ModLink(p->owner) + "<div class=mute>" + E(p->ownerHow) + "</div>" +
+                std::string t = std::string("<tr class=\"f") + (bad ? " bad" : "") + "\" id=\"p-" + std::to_string(p->id) + "\">";
+                t += "<td class=mono>" + std::to_string(p->id) + "</td>";
+                t += "<td><div>" + E(p->location) + "</div><div class=\"mono mute\">+" + E(Hex(p->rva)) + "</div></td>";
+                t += "<td>" + E(p->kind) + (p->kindNote.empty() ? "" : "<div class=mute>" + E(p->kindNote) + "</div>") + "</td>";
+                t += "<td>" + ModLink(p->owner) + "<div class=mute>" + E(p->ownerHow) + "</div>" +
                      (p->target.empty() ? "" : "<div class=\"mono mute\">→ " + E(p->target) + "</div>") + "</td>";
-                h += "<td>";
-                if (!p->chainStatus.empty()) h += E(p->chainStatus);
-                if (p->chain.size() >= 2) h += "<div class=mute>" + E(ListText(p->chain)) + " → original</div>";
-                if (!p->victims.empty()) h += "<div><span class=\"chip hi\">overwrote</span> " + E(ListText(p->victims)) + "</div>";
-                if (!p->otherRefs.empty()) h += "<div class=mute>also references original: " + E(ListText(p->otherRefs)) + "</div>";
-                h += "</td>";
-                h += "<td><div class=bytes>" + E(p->origBytes) + "<br>→ <b>" + E(p->newBytes) + "</b></div></td>";
-                h += "</tr>";
+                t += "<td>";
+                if (!p->chainStatus.empty()) t += E(p->chainStatus);
+                if (p->chain.size() >= 2) t += "<div class=mute>" + E(ListText(p->chain)) + " → original</div>";
+                if (!p->victims.empty()) {
+                    t += std::string("<div><span class=\"chip hi\">") + (p->evidenceKind == "overlap" ? "overlaps" : "overwrote") +
+                         "</span> " + E(ListText(p->victims)) + "</div>";
+                    if (!p->stubAt.empty())
+                        t += "<div class=mute>Evidence: " + E(p->stubAt) + " · holds " + E(p->stubMatched) + " · " + E(p->stubReturns) +
+                             "</div>";
+                }
+                if (!p->otherRefs.empty())
+                    t += "<div class=mute>also references original (not evidence of a conflict): " + E(ListText(p->otherRefs)) + "</div>";
+                t += "</td>";
+                t += "<td><div class=bytes>" + E(p->origBytes) + "<br>→ <b>" + E(p->newBytes) + "</b></div></td>";
+                t += "</tr>";
+                return t;
+            };
+
+            // Collapse vtable slots that share one original function and one owner into a single row.
+            std::map<std::pair<std::string, std::string>, std::vector<const PatchRec*>> vgroups;
+            for (auto p : list)
+                if (p->kind == "vptr") vgroups[{ p->owner, p->origBytes }].push_back(p);
+            std::set<const PatchRec*> grouped;
+            for (auto& [key, g] : vgroups)
+                if (g.size() >= 3)
+                    for (auto p : g) grouped.insert(p);
+            std::set<std::pair<std::string, std::string>> emitted;
+            for (auto p : list) {
+                if (!grouped.count(p)) {
+                    h += row(p);
+                    continue;
+                }
+                auto key = std::make_pair(p->owner, p->origBytes);
+                if (!emitted.insert(key).second) continue;
+                auto& g = vgroups[key];
+                std::set<std::string> slots;
+                for (auto q : g) {
+                    auto pos = q->location.find(" slot ");
+                    if (pos == std::string::npos) {
+                        slots.insert("?");
+                        continue;
+                    }
+                    auto end = q->location.find(' ', pos + 6);
+                    slots.insert(q->location.substr(pos + 6, end == std::string::npos ? std::string::npos : end - pos - 6));
+                }
+                std::string slotText = slots.size() == 1 && *slots.begin() != "?" ? "slot " + *slots.begin() : "several slots";
+                h += "<tr class=f><td colspan=6><details><summary><b>" + std::to_string(g.size()) + " vtables, " + E(slotText) +
+                     "</b> — was " + E(key.second) + ", now " + ModLink(key.first) + " <span class=mute>(" + E(g.front()->chainStatus) +
+                     ")</span></summary><div class=tw><table><tbody>";
+                for (auto q : g) h += row(q);
+                h += "</tbody></table></div></details></td></tr>";
             }
             h += "</tbody></table></div></details>";
         }
@@ -578,13 +630,20 @@ ul.notes{margin:6px 0;padding-left:20px;color:var(--mute)}
             std::string rows;
             for (auto& m : r.modules)
                 if (!m.exceptionApis.empty())
+                {
+                    std::string ln = LowerA(m.name);
+                    bool lib = ln == "bink2w64.dll" || ln == "usvfs_x64.dll";
                     rows += "<tr class=f><td>" + ModLink(m.name) + "</td><td>" + E(m.category) + "</td><td>" +
-                            E(ListText(m.exceptionApis)) + "</td><td>" + (m.allowlisted ? "<span class=\"chip exp\">allowlisted</span>" : "") +
+                            E(ListText(m.exceptionApis)) + "</td><td>" +
+                            (lib ? std::string("<span class=\"chip exp\">library, not a crash guard</span>")
+                                 : (m.allowlisted ? std::string("<span class=\"chip exp\">allowlisted</span>") : std::string())) +
                             "</td></tr>";
-            if (rows.empty()) h += "<div class=empty>No DLL registers vectored exception handlers.</div>";
+                }
+            if (rows.empty()) h += "<div class=empty>No DLL imports a vectored-exception API.</div>";
             else
-                h += "<p class=mute>These DLLs can register vectored exception handlers, which see a crash before Crash Logger does. "
-                     "Order of execution can't be read from outside the process.</p><div class=tw><table><thead><tr><th>DLL</th>"
+                h += "<p class=mute>These DLLs import a vectored-exception API, so they can register a handler that sees a crash "
+                     "before Crash Logger does. Importing the API is not proof a handler is registered, and the order can't be read "
+                     "from outside the process.</p><div class=tw><table><thead><tr><th>DLL</th>"
                      "<th>Type</th><th>APIs</th><th></th></tr></thead><tbody>" + rows + "</tbody></table></div>";
         }
 
@@ -642,9 +701,12 @@ ul.notes{margin:6px 0;padding-left:20px;color:var(--mute)}
         // ---------------- info
         h += "<h2 id=info>Scan info</h2><ul class=notes>";
         for (auto& n : r.notes) h += "<li>" + E(n) + "</li>";
-        h += "</ul><p class=mute>Windows system DLLs are listed only where they were patched. Severity: High = a hook is likely dead "
-             "or a DLL targets the wrong game version · Medium = DLLs compete for the same code or crash handling · Low = shared but "
-             "usually working · Info = context.</p>";
+        h += "</ul><p class=mute>Windows system DLLs are listed only where they were patched.</p>"
+             "<p class=mute><b>Severity</b><br>"
+             "High = a previous hook's stolen bytes were found in a stub nothing calls anymore<br>"
+             "Medium = overlapping or near-overlapping patches, or several VEH-capable crash plugins<br>"
+             "Low = chained shared site, usually fine<br>"
+             "Info = same function, unattributed bytes, imports, weak pointer matches</p>";
         h += Foot();
         return h;
     }

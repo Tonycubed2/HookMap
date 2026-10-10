@@ -197,6 +197,7 @@ namespace hm
             uint32_t runtimePacked_ = 0;
             std::string runtimeStr_;
             uint32_t skseCorePacked_ = 0;
+            std::vector<uint8_t> gameDisk_;   // clean SkyrimSE.exe image (empty without a baseline)
 
             // ---- helpers
             int ModAt(uint64_t a) const;
@@ -233,6 +234,8 @@ namespace hm
             std::map<std::pair<int, uint64_t>, std::vector<int>> FunctionGroups();
             void InferSameFunctionOwners();
             void AnalyzeChains();
+            void FindTrampolineEvidence();
+            std::unordered_set<uint64_t> ReachFrom(const PInfo& pi);
             void Locate();
             void ReadSkseLog();
             void BuildConflicts();
@@ -896,6 +899,7 @@ namespace hm
             std::string err;
             if (m.game) {
                 if (!GameBaseline(mi, disk)) return;
+                if (!m.noBaseline) gameDisk_ = disk;
             } else if (!LoadFileAsImage(m.e.physPath, m.e.base, disk, err)) {
                 m.rec.scanNote = "not scanned: " + err + " (" + W2U(m.e.physPath) + ")";
                 return;
@@ -1179,15 +1183,22 @@ namespace hm
             while (cursor < b && budget) {
                 Branch br;
                 uint32_t pos = cursor;
+                // The changed bytes may start mid-instruction (a retargeted E8 keeps its opcode byte), so look back up to
+                // 4 bytes and pick the branch that best explains the whole change: one that covers the changed range,
+                // is a full-size branch, and sits where the original file also had a branch of the same size.
+                int bestScore = -1;
                 for (uint32_t k = 0; k <= (first ? 4u : 0u) && k <= cursor; ++k) {
                     uint32_t p = cursor - k;
                     if (k && std::memcmp(mem.data() + p, disk.data() + p, k) != 0) break;
                     size_t avail = std::min<size_t>(32, mem.size() - p);
                     Branch t = DecodeBranch(mem.data() + p, avail, m.e.base + p);
-                    if (t.IsBranch() && p + (uint32_t)t.len > cursor) {
+                    if (!t.IsBranch() || p + (uint32_t)t.len <= cursor) continue;
+                    Branch o = DecodeBranch(disk.data() + p, std::min<size_t>(32, disk.size() - p), m.e.base + p);
+                    int score = (p + (uint32_t)t.len >= b ? 4 : 0) + (t.len >= 5 ? 2 : 0) + (o.IsBranch() && o.len == t.len ? 2 : 0);
+                    if (score > bestScore) {
+                        bestScore = score;
                         br = t;
                         pos = p;
-                        break;
                     }
                 }
                 first = false;
@@ -1655,32 +1666,243 @@ namespace hm
                     }
                 }
 
-                // Other modules that hold the original pointer but are not on the call-through path.
-                std::vector<int> storers;
+                // Other modules that merely hold the original target. That alone says nothing about this site
+                // (any DLL that calls the function holds it), so it is only listed, never treated as a victim.
+                // Victims come from FindTrampolineEvidence, which needs a stub tied to this exact site.
                 for (int mi = 0; mi < (int)mods_.size(); ++mi) {
                     if (!Eligible(mi) || mi == O || std::find(path.begin(), path.end(), mi) != path.end()) continue;
                     if (!mods_[mi].read || !isOrig(mods_[mi].dataRefs)) continue;
                     if (T && ownedOrig.count(mi) && ownedOrig[mi].count(T)) continue;  // explained by its own patch
-                    storers.push_back(mi);
+                    pr.otherRefs.push_back(W2U(mods_[mi].e.name));
                 }
-                std::vector<int> victims;
-                for (int x : storers)
-                    if (pi.isVptr || !mods_[x].orphans.empty() || pi.detour) victims.push_back(x);
-
-                for (int x : storers)
-                    if (std::find(victims.begin(), victims.end(), x) == victims.end()) pr.otherRefs.push_back(W2U(mods_[x].e.name));
-                for (int x : victims) pr.victims.push_back(W2U(mods_[x].e.name));
                 for (int c : path) pr.chain.push_back(W2U(mods_[c].e.name));
-
-                if (status.empty()) {
-                    if (!victims.empty()) status = pi.isVptr ? "possibly clobbered" : "likely clobbered";
-                    else status = "no call-through found (replacement hook, or original kept somewhere HookMap can't see)";
-                } else if (!victims.empty()) {
-                    // The owner reaches the original itself, so whatever was hooked here before it is skipped.
-                    status = std::string(pi.isVptr ? "possibly clobbered — " : "likely clobbered — ") + status +
-                             " directly, skipping the earlier hook";
-                }
+                if (status.empty()) status = "no call-through found (replacement hook, or original kept somewhere HookMap can't see)";
                 pr.chainStatus = status;
+            }
+        }
+
+        // Private-memory code (trampolines, stubs, thunks) reachable from a patched site, following
+        // site -> stub/thunk -> DLL -> trampolines that DLL stores -> next DLL -> ...  This is how hook chains link up.
+        std::unordered_set<uint64_t> Engine::ReachFrom(const PInfo& pi)
+        {
+            std::unordered_set<uint64_t> seen;
+            std::set<int> modsSeen;
+            std::vector<uint64_t> work;
+            if (pi.newTarget) work.push_back(pi.newTarget);
+            work.insert(work.end(), pi.hops.begin(), pi.hops.end());
+            work.insert(work.end(), pi.thunkRefs.begin(), pi.thunkRefs.end());
+            auto visitMod = [&](int m) {
+                if (!Eligible(m) || !modsSeen.insert(m).second || modsSeen.size() > 64) return;
+                for (auto v : mods_[m].dataRefs)
+                    if (PrivAt(v) >= 0) work.push_back(v);
+            };
+            if (pi.owner >= 0) visitMod(pi.owner);
+            while (!work.empty() && seen.size() < 200000) {
+                uint64_t a = work.back();
+                work.pop_back();
+                int m = ModAt(a);
+                if (m >= 0) {
+                    visitMod(m);
+                    continue;
+                }
+                if (PrivAt(a) < 0 || !seen.insert(a).second) continue;
+                Resolved r = Resolve(a);
+                for (auto h : r.hops) seen.insert(h);
+                if (r.mod >= 0) visitMod(r.mod);
+                if (r.final && ModAt(r.final) < 0 && PrivAt(r.final) >= 0) work.push_back(r.final);
+                for (auto t : r.thunkRefs) work.push_back(t);
+            }
+            return seen;
+        }
+
+        // Rule 1: a DLL is only called the victim of a patch when its trampoline for that exact site is found.
+        // A trampoline holds the site's original instruction(s) (verbatim, or a relocated copy of a stolen call) and
+        // jumps back to the end of the stolen range. If the DLL still stores the trampoline's address but no current
+        // hook reaches it, the site was overwritten after that DLL hooked it. If the stolen range only partly lines up
+        // with the current patch, the newer patch overlaps (ate) the earlier hook.
+        void Engine::FindTrampolineEvidence()
+        {
+            if (gameDisk_.empty() || gameIdx_ < 0) return;
+            Mod& g = mods_[gameIdx_];
+            const uint64_t gb = g.e.base;
+
+            struct Range
+            {
+                uint32_t lo, hi;
+                int      pinfo;
+            };
+            std::vector<Range> ranges;
+            for (int i = 0; i < (int)pinfo_.size(); ++i) {
+                auto& pi = pinfo_[i];
+                auto& pr = rep_.patches[pi.patch];
+                if (pi.mod != gameIdx_ || pi.isVptr || pi.isIat || pr.kind == "data") continue;
+                ranges.push_back({ (uint32_t)pr.rva, (uint32_t)(pr.rva + pr.len), i });
+            }
+            if (ranges.empty()) return;
+
+            // Every address a current hook reaches.
+            std::unordered_set<uint64_t> reached;
+            for (auto& pi : pinfo_) {
+                if (pi.newTarget) reached.insert(pi.newTarget);
+                for (auto h : pi.hops) reached.insert(h);
+                for (auto t : pi.thunkRefs) reached.insert(t);
+            }
+
+            struct Hit
+            {
+                uint64_t    stub = 0, jmpAt = 0, cont = 0;
+                uint32_t    siteRva = 0, len = 0;
+                uint32_t    minLen = 0;  // verbatim matches: any length from minLen..len fits, the stored address decides
+                std::string matched;
+            };
+            std::vector<Hit> hits;
+            const uint8_t* disk = gameDisk_.data();
+
+            for (auto& r : priv_) {
+                const auto& by = r.bytes;
+                for (size_t k = 0; k + 5 <= by.size(); ++k) {
+                    uint8_t op = by[k];
+                    if (op != 0xE9 && op != 0xFF && op != 0x48 && op != 0x49 && op != 0x68) continue;
+                    uint64_t J = r.base + k;
+                    Branch b = DecodeBranch(by.data() + k, std::min<size_t>(32, by.size() - k), J);
+                    if (!IsJumpKind(b.kind)) continue;
+                    uint64_t C = b.target;
+                    if (b.IsIndirect() && !ReadQ(b.slot, C)) continue;
+                    if (C <= gb || C >= gb + g.e.size || !g.InExec(C)) continue;
+                    uint32_t crva = (uint32_t)(C - gb);
+                    if (crva > gameDisk_.size()) continue;
+
+                    Hit h;
+                    bool ok = false;
+                    // Original bytes copied verbatim right before the jump back. Padding before a trampoline can
+                    // match padding before the function, so every length that matches is kept as a candidate.
+                    for (uint32_t L = 32; L >= 5 && !ok; --L) {
+                        if (k < L || crva < L) continue;
+                        if (std::memcmp(by.data() + k - L, disk + crva - L, L) != 0) continue;
+                        h.stub = J - L;
+                        h.siteRva = crva - L;
+                        h.len = L;
+                        h.minLen = 5;
+                        ok = true;
+                    }
+                    // A stolen call (E8 rel32) relocated into the trampoline, optionally followed by verbatim bytes.
+                    for (uint32_t L = 5; L <= 32 && !ok; ++L) {
+                        if (crva < L) break;
+                        uint32_t s = crva - L, tail = L - 5;
+                        if (disk[s] != 0xE8 || k < tail) continue;
+                        if (tail && std::memcmp(by.data() + k - tail, disk + s + 5, tail) != 0) continue;
+                        int32_t rel;
+                        std::memcpy(&rel, disk + s + 1, 4);
+                        uint64_t T = gb + s + 5 + (int64_t)rel;
+                        size_t end = k - tail;
+                        for (size_t back = 5; back <= 24 && back <= end && !ok; ++back) {
+                            size_t p = end - back;
+                            Branch cb = DecodeBranch(by.data() + p, std::min<size_t>(32, by.size() - p), r.base + p);
+                            size_t clen = (size_t)cb.len;
+                            // call [rip+2] ; jmp +8 ; dq target
+                            if (cb.kind == BrKind::CallInd && p + 8 <= by.size() && by[p + 6] == 0xEB && by[p + 7] == 0x08 &&
+                                cb.slot == r.base + p + 8)
+                                clen = 16;
+                            if (clen != back) continue;
+                            if (cb.kind != BrKind::Call && cb.kind != BrKind::CallInd && cb.kind != BrKind::AbsCall) continue;
+                            uint64_t ct = cb.target;
+                            if (cb.IsIndirect() && !ReadQ(cb.slot, ct)) continue;
+                            if (ct != T) continue;
+                            h.stub = r.base + p;
+                            h.siteRva = s;
+                            h.len = L;
+                            h.minLen = L;
+                            h.matched = "relocated copy of call " + AddrText(T) + " (original E8 " + HexBytes(disk + s + 1, 4) + ")" +
+                                        (tail ? " + " + HexBytes(disk + s + 5, tail) : "");
+                            ok = true;
+                        }
+                    }
+                    if (!ok) continue;
+                    h.jmpAt = J;
+                    h.cont = C;
+                    hits.push_back(std::move(h));
+                }
+            }
+
+            std::sort(ranges.begin(), ranges.end(), [](const Range& a, const Range& b) { return a.lo < b.lo; });
+            std::set<uint64_t> used;
+            const bool dbg = !EnvVar(L"HOOKMAP_DEBUG").empty();
+            auto holdersOf = [&](uint64_t a) {
+                std::vector<int> v;
+                for (int mi = 0; mi < (int)mods_.size(); ++mi)
+                    if (Eligible(mi) && mods_[mi].read && SortedContains(mods_[mi].dataRefs, a)) v.push_back(mi);
+                return v;
+            };
+            for (auto& h : hits) {
+                // Anchor the trampoline start to an address some DLL actually stores (or a current hook reaches).
+                std::vector<int> holders;
+                bool anchored = false;
+                for (uint32_t L = h.minLen; L <= h.len && !anchored; ++L) {
+                    uint64_t a = h.jmpAt - L;
+                    auto hv = holdersOf(a);
+                    if (hv.empty() && !reached.count(a)) continue;
+                    holders = std::move(hv);
+                    h.stub = a;
+                    h.siteRva = (uint32_t)(h.cont - gb) - L;
+                    h.len = L;
+                    anchored = true;
+                }
+                if (!anchored) continue;  // nobody stores or reaches it: can't say whose it is
+                if (h.matched.empty()) h.matched = HexBytes(disk + h.siteRva, h.len, 40);
+                if (dbg)
+                    printf("[dbg] stub %llx site %x len %u cont %llx holders=%zu\n", (unsigned long long)h.stub, h.siteRva, h.len,
+                        (unsigned long long)h.cont, holders.size());
+                if (!used.insert(h.stub).second) continue;  // one stub explains one site
+
+                const Range* hitRange = nullptr;
+                for (auto& rg : ranges)
+                    if (rg.lo < h.siteRva + h.len && h.siteRva < rg.hi) {
+                        if (!hitRange || rg.lo == h.siteRva) hitRange = &rg;
+                    }
+                if (!hitRange) continue;  // nothing is patched there now (hook was removed)
+                PInfo& pi = pinfo_[hitRange->pinfo];
+                PatchRec& pr = rep_.patches[pi.patch];
+                bool sameSite = hitRange->lo == h.siteRva;
+
+                // Still reached from this site: it's how the current hook (or a hook it chains to) runs the original.
+                bool local = ReachFrom(pi).count(h.stub) > 0;
+                bool heldByPath = false;
+                for (int x : holders) {
+                    if (x == pi.owner) heldByPath = true;
+                    for (auto& c : pr.chain)
+                        if (c == W2U(mods_[x].e.name)) heldByPath = true;
+                }
+                if (local || heldByPath) {
+                    if (sameSite && pr.chainStatus.rfind("no call-through found", 0) == 0) {
+                        bool own = holders.empty() || (holders.size() == 1 && holders[0] == pi.owner);
+                        if (own) {
+                            pr.chainStatus = "calls original (through its trampoline)";
+                        } else {
+                            pr.chainStatus = "chained";
+                            pr.chain.clear();
+                            if (pi.owner >= 0) pr.chain.push_back(W2U(mods_[pi.owner].e.name));
+                            for (int x : holders)
+                                if (x != pi.owner) pr.chain.push_back(W2U(mods_[x].e.name));
+                        }
+                    }
+                    continue;
+                }
+                if (holders.empty() || reached.count(h.stub)) continue;  // reached from elsewhere, or nobody to name
+
+                bool overlap = !sameSite;
+                std::string names;
+                for (int x : holders) {
+                    std::string n = W2U(mods_[x].e.name);
+                    if (std::find(pr.victims.begin(), pr.victims.end(), n) == pr.victims.end()) pr.victims.push_back(n);
+                    names += (names.empty() ? "" : ", ") + n;
+                }
+                auto add = [](std::string& f, const std::string& v) { f += (f.empty() ? "" : "; ") + v; };
+                add(pr.stubAt, names + " trampoline at " + Hex(h.stub) + " (private memory), for site SkyrimSE.exe+" + Hex(h.siteRva));
+                add(pr.stubMatched, h.matched);
+                add(pr.stubReturns, "jumps back to SkyrimSE.exe+" + Hex(h.cont - gb) + " (jump at " + Hex(h.jmpAt) + ")");
+                if (pr.evidenceKind.empty() || overlap) pr.evidenceKind = overlap ? "overlap" : "clobber";
+                pr.chainStatus = overlap ? "overlaps " + names + "'s earlier hook at SkyrimSE.exe+" + Hex(h.siteRva)
+                                         : "overwrote " + names + "'s hook (its trampoline is no longer reached)";
             }
         }
 
@@ -1784,28 +2006,47 @@ namespace hm
                 return s;
             };
 
-            // 1. clobbers and chained shared sites
+            auto verb = [](const std::vector<std::string>& v) { return v.size() > 1 ? std::string("hold") : std::string("holds"); };
+            auto strongOwner = [](const PatchRec& pr) { return pr.ownerHow == "direct" || pr.ownerHow == "via trampoline"; };
+            auto siteText = [](const PatchRec& pr) {
+                std::string w = pr.location;
+                if (auto plus = w.find(" +"); plus != std::string::npos && w.rfind("ID ", 0) == 0) {
+                    auto dash = w.find(" — ");
+                    w = w.substr(0, plus) + (dash != std::string::npos ? w.substr(dash) : "");
+                }
+                return w;
+            };
+
+            // 1. clobbers and overlaps — only with a trampoline tied to the site (rule 1); chained shared sites
             for (auto& pi : pinfo_) {
                 auto& pr = rep_.patches[pi.patch];
-                if (!pr.victims.empty()) {
+                if (!pr.victims.empty() && !pr.stubAt.empty()) {
                     ConflictRec c;
-                    bool likely = pr.chainStatus.rfind("likely", 0) == 0;
-                    bool direct = pr.chainStatus.find("calls original") != std::string::npos;
-                    c.severity = likely ? kHigh : kMedium;
-                    c.category = "clobber";
-                    c.title = pr.owner + (likely ? " overwrote " : " may have overwritten ") + modsText(pr.victims) +
-                              "'s hook at " + pr.location;
-                    c.detail = "The " + pr.kind + " at " + pr.inModule + "+" + Hex(pr.rva) + " now goes to " + pr.owner +
-                               (direct ? ", which calls the original game code itself. " : ". ") + modsText(pr.victims) +
-                               " also holds this site's original target" +
-                               (pi.isVptr ? "" : " and has a hook stub that nothing points to any more") +
-                               ", which is what a hook that was installed first and then overwritten looks like. "
-                               "If so, its hook here never runs. Fix: load order, or ask the author of " + pr.owner +
-                               " to call through the previous target instead of the original.";
+                    bool overlap = pr.evidenceKind == "overlap";
+                    c.severity = strongOwner(pr) ? kHigh : kMedium;
+                    c.category = overlap ? "overlap" : "clobber";
+                    if (overlap) {
+                        c.title = pr.owner + "'s patch at " + pr.location + " overlaps " + modsText(pr.victims) + "'s earlier hook";
+                        c.detail = "The " + std::to_string(pr.len) + "-byte " + pr.kind + " at " + pr.inModule + "+" + Hex(pr.rva) +
+                                   " (owner " + pr.owner + ", " + pr.ownerHow + ") covers bytes that " + modsText(pr.victims) +
+                                   " had already hooked, without starting at the same instruction, so the two can't chain. Evidence: " +
+                                   pr.stubAt + "; it holds the original bytes " + pr.stubMatched + " and " + pr.stubReturns +
+                                   ". Nothing reaches that trampoline any more, so " + modsText(pr.victims) + "'s hook there never runs.";
+                    } else {
+                        c.title = pr.owner + " overwrote " + modsText(pr.victims) + "'s hook at " + pr.location;
+                        c.detail = "The " + pr.kind + " at " + pr.inModule + "+" + Hex(pr.rva) + " now goes to " + pr.owner + " (" +
+                                   pr.ownerHow + "). Evidence: " + pr.stubAt + "; it holds this site's original bytes " + pr.stubMatched +
+                                   " and " + pr.stubReturns + ". " + modsText(pr.victims) + " still " + verb(pr.victims) +
+                                   " that trampoline's address but no hook reaches it any more, so " + modsText(pr.victims) +
+                                   "'s hook here never runs. Fix: change load order, or ask the author of " + pr.owner +
+                                   " to call through the previous target instead of the original.";
+                    }
+                    if (!strongOwner(pr))
+                        c.detail += " Severity lowered: the current owner (" + pr.owner + ") is inferred, not read directly.";
                     c.modules = { pr.owner };
                     c.modules.insert(c.modules.end(), pr.victims.begin(), pr.victims.end());
                     c.patches = { pr.id };
-                    c.key = "clobber|" + pr.inModule + "|" + Hex(pr.rva) + "|" + modsText(c.modules);
+                    c.key = c.category + "|" + pr.inModule + "|" + Hex(pr.rva) + "|" + modsText(c.modules);
                     out.push_back(std::move(c));
                 }
                 if (pr.chain.size() >= 2) {
@@ -1822,7 +2063,97 @@ namespace hm
                 }
             }
 
-            // 2. same function patched by different owners
+            // 1b. overlapping patch records (two recorded patches whose byte ranges overlap)
+            {
+                std::map<int, std::vector<int>> byMod;
+                for (auto& pi : pinfo_) {
+                    auto& pr = rep_.patches[pi.patch];
+                    if (pi.isIat || pi.isVptr || pr.kind == "data") continue;
+                    byMod[pi.mod].push_back(pi.patch);
+                }
+                for (auto& [mi, list] : byMod) {
+                    std::sort(list.begin(), list.end(), [&](int x, int y) { return rep_.patches[x].rva < rep_.patches[y].rva; });
+                    for (size_t i = 1; i < list.size(); ++i) {
+                        auto& p = rep_.patches[list[i - 1]];
+                        auto& q = rep_.patches[list[i]];
+                        uint64_t pEnd = p.rva + p.len;
+                        if (q.rva < pEnd && q.rva != p.rva) {
+                            ConflictRec c;
+                            c.severity = (strongOwner(p) && strongOwner(q)) ? kHigh : kMedium;
+                            c.category = "overlap";
+                            c.title = "Overlapping patches at " + p.location + ": " + p.owner + " and " + q.owner;
+                            c.detail = p.inModule + "+" + Hex(p.rva) + " (" + std::to_string(p.len) + " bytes, " + p.owner + ") and +" +
+                                       Hex(q.rva) + " (" + std::to_string(q.len) + " bytes, " + q.owner +
+                                       ") share bytes but start at different instructions, so they can't chain.";
+                            c.modules = { p.owner, q.owner };
+                            c.patches = { p.id, q.id };
+                            c.key = "overlap2|" + p.inModule + "|" + Hex(p.rva) + "|" + Hex(q.rva);
+                            out.push_back(std::move(c));
+                        } else if (q.rva >= pEnd && q.rva - pEnd < 16 && p.owner != q.owner &&
+                                   (p.owner != kUnattributed || q.owner != kUnattributed)) {
+                            ConflictRec c;
+                            c.severity = kMedium;
+                            c.category = "near";
+                            uint64_t gap = q.rva - pEnd;
+                            std::string gapText = gap == 0 ? std::string("right next to each other")
+                                                           : std::to_string(gap) + (gap == 1 ? " byte apart" : " bytes apart");
+                            c.title = "Patches " + gapText + " at " + siteText(p) + ": " + p.owner + " and " + q.owner;
+                            c.detail = p.inModule + "+" + Hex(p.rva) + " (" + std::to_string(p.len) + " bytes, " + p.owner + ") " +
+                                       (gap == 0 ? std::string("ends exactly where +") + Hex(q.rva) + " (" + q.owner + ") starts"
+                                                 : "ends " + gapText.substr(0, gapText.size() - 6) + " before +" + Hex(q.rva) + " (" +
+                                                       q.owner + ")") +
+                                       ". They don't share bytes, but a later update that hooks a slightly longer range would collide.";
+                            c.modules = { p.owner, q.owner };
+                            c.patches = { p.id, q.id };
+                            c.key = "near|" + p.inModule + "|" + Hex(p.rva) + "|" + Hex(q.rva);
+                            out.push_back(std::move(c));
+                        }
+                    }
+                }
+            }
+
+            // 1c. hooks that call a game function another DLL has detoured: both run (one Info note per function)
+            if (gameIdx_ >= 0) {
+                const uint64_t gb = mods_[gameIdx_].e.base;
+                std::map<uint64_t, int> detourAt;  // entry rva -> patch index
+                for (auto& pi : pinfo_) {
+                    auto& pr = rep_.patches[pi.patch];
+                    if (pi.mod != gameIdx_ || pi.isVptr || pi.isIat || pi.owner < 0) continue;
+                    if (pr.kind == "jmp" || pr.kind == "abs jmp" || pr.kind == "jmp [ptr]") detourAt[pr.rva] = pi.patch;
+                }
+                std::map<uint64_t, std::vector<int>> callers;
+                for (auto& pi : pinfo_) {
+                    auto& pr = rep_.patches[pi.patch];
+                    if (!pi.origTarget || pi.origTarget < gb || pi.origTarget >= gb + mods_[gameIdx_].e.size) continue;
+                    if (pr.chainStatus.rfind("calls original", 0) != 0 && pr.chainStatus != "chained") continue;
+                    auto it = detourAt.find(pi.origTarget - gb);
+                    if (it == detourAt.end() || rep_.patches[it->second].owner == pr.owner) continue;
+                    callers[pi.origTarget - gb].push_back(pi.patch);
+                }
+                for (auto& [rva, list] : callers) {
+                    auto& d = rep_.patches[detourAt[rva]];
+                    std::set<std::string> owners;
+                    for (int p : list) owners.insert(rep_.patches[p].owner);
+                    std::vector<std::string> ow(owners.begin(), owners.end());
+                    ConflictRec c;
+                    c.severity = kInfo;
+                    c.category = "entry-detour";
+                    std::string nm = siteText(d);
+                    std::string at = "SkyrimSE.exe+" + Hex(rva);
+                    c.title = std::to_string(list.size()) + " hook(s) by " + modsText(ow) + " call " + at +
+                              (nm != at ? " (" + nm + ")" : std::string()) + ", which is detoured by " + d.owner + ", so " + d.owner +
+                              " still runs";
+                    c.detail = "Calling the function's entry runs " + d.owner + "'s detour first. Nothing is skipped.";
+                    c.modules = ow;
+                    c.modules.push_back(d.owner);
+                    c.patches = list;
+                    c.patches.push_back(d.id);
+                    c.key = "entry|" + Hex(rva);
+                    out.push_back(std::move(c));
+                }
+            }
+
+            // 2. same function patched by different owners — context, not a collision
             for (auto& [k, idxs] : FunctionGroups()) {
                 std::vector<int> list;
                 for (int i : idxs) list.push_back(pinfo_[i].patch);
@@ -1835,24 +2166,18 @@ namespace hm
                 }
                 if (owners.size() < 2) continue;
                 auto& p0 = rep_.patches[list.front()];
-                std::string where = p0.location;
-                if (auto plus = where.find(" +"); plus != std::string::npos && where.rfind("ID ", 0) == 0) {
-                    auto dash = where.find(" — ");
-                    where = where.substr(0, plus) + (dash != std::string::npos ? where.substr(dash) : "");
-                }
                 ConflictRec c;
-                c.severity = owners.size() >= 2 ? kMedium : kLow;
+                c.severity = kInfo;
                 c.category = "same-function";
                 c.modules.assign(owners.begin(), owners.end());
                 if (anyUnknown) c.modules.push_back(kUnattributed);
-                bool windowsTarget = mods_[k.first].windows;
-                c.title = (windowsTarget ? "Competing hooks on " + p0.inModule + " " : "Same function patched by several DLLs: ") +
-                          where + " — " + modsText(c.modules);
-                c.detail = std::to_string(list.size()) + " separate patches inside one function of " + p0.inModule +
-                           ". They don't touch the same bytes, but they change the same code path, so the result depends on "
-                           "how the patches interact.";
+                c.title = "Busy function: " + siteText(p0) + " in " + p0.inModule + " — " + std::to_string(list.size()) +
+                          " patches from " + std::to_string(c.modules.size()) + " DLLs";
+                c.detail = "These patches are at different places in the same function and don't share any bytes. "
+                           "That's a crowded function, not a collision. Patches that actually overlap or sit within a few bytes "
+                           "of each other are listed separately.";
                 c.patches = list;
-                c.key = "samefn|" + p0.inModule + "|" + where + "|" + modsText(c.modules);
+                c.key = "samefn|" + p0.inModule + "|" + siteText(p0) + "|" + modsText(c.modules);
                 out.push_back(std::move(c));
             }
 
@@ -1864,16 +2189,21 @@ namespace hm
                 if (m.game || m.windows || pi.isIat) continue;
                 cross[{ pi.mod, pr.owner }].push_back(pi.patch);
             }
+            static const std::set<std::string> kCodeKinds = { "bytes", "flow", "call", "jmp", "jcc", "abs jmp", "abs call" };
             for (auto& [k, list] : cross) {
                 ConflictRec c;
                 c.severity = kMedium;
                 c.category = "cross-module";
                 std::string target = W2U(mods_[k.first].e.name);
+                bool codeBytes = false;
+                for (int p : list) codeBytes |= kCodeKinds.count(rep_.patches[p].kind) > 0;
                 c.title = (k.second == kUnattributed ? std::string("Unattributed patches inside ") : k.second + " patches code inside ") +
                           target + " (" + std::to_string(list.size()) + ")";
-                c.detail = "Code inside " + target +
-                           " differs from its file on disk. If " + target +
-                           " is updated, these patches can land on the wrong bytes and crash.";
+                c.detail = "Code inside " + target + " differs from its file on disk." +
+                           (codeBytes ? " If " + target + " is updated, these patches can land on the wrong bytes and crash."
+                                      : std::string(" These are pointer/import redirects that are re-made each time the game loads, "
+                                                    "so they don't depend on " + target + "'s exact code."));
+                if (!codeBytes) c.severity = kLow;
                 c.modules = { target };
                 if (k.second != kUnattributed) c.modules.push_back(k.second);
                 c.patches = list;
@@ -1901,19 +2231,20 @@ namespace hm
                 out.push_back(std::move(c));
             }
 
-            // 5. exception handler stacking
+            // 5. exception handler stacking — importing the API is not proof a handler is registered
+            static const std::set<std::wstring> kNotGuards = { L"bink2w64.dll", L"usvfs_x64.dll" };
             std::vector<std::string> veh;
             for (auto& m : mods_)
-                if (m.registersVeh && !m.windows) veh.push_back(W2U(m.e.name));
+                if (m.registersVeh && !m.windows && !kNotGuards.count(Lower(m.e.name))) veh.push_back(W2U(m.e.name));
             if (veh.size() >= 2) {
                 ConflictRec c;
                 c.severity = kMedium;
                 c.category = "veh";
-                c.title = std::to_string(veh.size()) + " DLLs install vectored exception handlers";
-                c.detail = "Each of these can see (and swallow or \"fix\") a crash before the others and before Crash Logger. "
-                           "Stacked guards can turn a clean crash into a freeze or a later, unrelated-looking crash. "
-                           "Registration order can't be read from outside the process; handlers added with First=1 run first, "
-                           "otherwise roughly in DLL load order: " + modsText(veh) + ".";
+                c.title = std::to_string(veh.size()) + " DLLs import a vectored-exception API (not proof a handler is registered)";
+                c.detail = "Each of these can register a handler that sees (and can swallow or \"fix\") a crash before the others "
+                           "and before Crash Logger. Stacked guards can turn a clean crash into a freeze or a later, "
+                           "unrelated-looking crash. Whether each one actually registers a handler, and in what order, can't be "
+                           "read from outside the process: " + modsText(veh) + ".";
                 c.modules = veh;
                 c.key = "veh|" + modsText(veh);
                 out.push_back(std::move(c));
@@ -1935,17 +2266,18 @@ namespace hm
             // 7. orphaned stubs not already explained by a clobber
             std::set<std::string> inClobber;
             for (auto& c : out)
-                if (c.category == "clobber")
+                if (c.category == "clobber" || c.category == "overlap")
                     for (auto& m : c.modules) inClobber.insert(m);
             for (auto& m : mods_) {
                 if (m.orphans.empty() || inClobber.count(W2U(m.e.name))) continue;
                 ConflictRec c;
                 c.severity = kLow;
                 c.category = "orphan";
-                c.title = W2U(m.e.name) + " has " + std::to_string(m.orphans.size()) + " hook stub(s) nothing points to";
-                c.detail = "Trampoline stubs that jump into " + W2U(m.e.name) +
-                           " exist, but no patched site, stored pointer or thunk references them. Either the DLL removed "
-                           "its own hook, or another DLL overwrote the site without keeping the old target.";
+                c.title = W2U(m.e.name) + " has " + std::to_string(m.orphans.size()) + " jump stub(s) nothing points to";
+                c.detail = "Small jump stubs that lead into " + W2U(m.e.name) +
+                           " exist, but no patched site, stored pointer or thunk references them. Often a hook the DLL "
+                           "installed and later removed, or spare trampoline space. They aren't tied to any particular site, "
+                           "so this says nothing about other DLLs.";
                 c.modules = { W2U(m.e.name) };
                 c.key = "orphan|" + W2U(m.e.name);
                 out.push_back(std::move(c));
@@ -2066,6 +2398,7 @@ namespace hm
             AttributeBytePatches();
             InferSameFunctionOwners();
             AnalyzeChains();
+            FindTrampolineEvidence();
             Locate();
 
             for (auto& pi : pinfo_) {
@@ -2081,8 +2414,10 @@ namespace hm
             rep_.notes.push_back("SetUnhandledExceptionFilter is imported by nearly every MSVC binary through the CRT, so it is "
                                  "only listed when a DLL looks it up by name at runtime.");
             rep_.notes.push_back("Writable game data (.data) is not compared; patches made there are invisible to this scan.");
-            rep_.notes.push_back("Owner attribution marked \"inferred\" is a best guess (thunk voting or byte-pattern match). "
-                                 "\"Clobbered\" verdicts are evidence-based guesses; confirm by removing one DLL and rescanning.");
+            rep_.notes.push_back("Owner attribution marked \"inferred\" is a best guess (thunk voting or byte-pattern match).");
+            rep_.notes.push_back("An \"overwrote\" verdict is only given when the earlier hook's trampoline was found: it holds the "
+                                 "site's original bytes, jumps back to the site, and nothing reaches it any more. A DLL that merely "
+                                 "holds the original address is listed under \"also references original\" and is never called a victim.");
             if (!priv_.empty())
                 rep_.notes.push_back(std::to_string(priv_.size()) + " executable private memory regions (trampolines/thunks) examined.");
 

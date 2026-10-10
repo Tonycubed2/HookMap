@@ -18,6 +18,12 @@ Compare two scans:
 HookMap.exe --diff HookMap_old.json HookMap_new.json
 ```
 
+Rebuild the HTML from a saved report:
+
+```
+HookMap.exe --render HookMap_old.json
+```
+
 Run `HookMap.exe --help` for all options.
 
 ### allowlist.txt
@@ -30,7 +36,8 @@ DLLs that patch heavily by design (SKSE, Engine Fixes, overlays…). Findings th
 - The Steam SkyrimSE.exe is DRM-encrypted on disk; HookMap decrypts it in memory to get a clean copy (nothing is written). If that fails it falls back to finding calls/jumps that lead into DLLs, or you can pass `--clean-exe` with an unencrypted copy.
 - Follows each redirected call/jump/pointer through trampolines and thunks to the DLL that owns it.
 - Byte patches are attributed by finding the patch bytes in a DLL's data.
-- Chain analysis: checks whether a hook's owner holds the original target (calls through), chains to another hook, or overwrote an earlier hook whose trampoline stub is now unreferenced.
+- Chain analysis: checks whether a hook's owner calls the original, or chains to another hook through its trampoline.
+- An "overwrote" or "overlap" verdict needs site-specific evidence: the earlier hook's trampoline, holding that site's original bytes and jumping back to it, stored by that DLL but no longer reached. A DLL that merely holds the original function's address is listed as a reference, never as a victim.
 - Reads each SKSE plugin's version data, the PE headers (Rich header, imports, debug info) and `skse64.log`.
 - Names locations via Address Library IDs (SE or AE database, matching the running game) and, if `CommonLibSSEPath_NG` is set, names harvested from CommonLibSSE-NG sources.
 
