@@ -22,6 +22,8 @@ namespace
         "  --addrlib PATH     Address Library .bin file, or the folder that holds it\n"
         "  --clib DIR         CommonLibSSE-NG folder for function/vtable names\n"
         "                     (default: CommonLibSSEPath_NG environment variable)\n"
+        "  --clean-exe FILE   unencrypted copy of the running SkyrimSE.exe to compare against\n"
+        "                     (only needed if HookMap can't decrypt the Steam exe itself)\n"
         "  --mo2 DIR          MO2 instance folder (normally detected automatically)\n"
         "  --allowlist FILE   allowlist file (default: allowlist.txt next to HookMap.exe)\n"
         "  --out DIR          where to write the reports (default: next to HookMap.exe)\n"
@@ -215,6 +217,7 @@ int wmain(int argc, wchar_t** argv)
         else if (a == L"--addrlib") next(o.addrlib), o.rawArgs.push_back(o.addrlib);
         else if (a == L"--clib") next(o.clib), o.rawArgs.push_back(o.clib);
         else if (a == L"--mo2") next(o.mo2), o.rawArgs.push_back(o.mo2);
+        else if (a == L"--clean-exe") next(o.cleanExe), o.rawArgs.push_back(o.cleanExe);
         else if (a == L"--out") next(o.outDir), o.rawArgs.push_back(o.outDir);
         else if (a == L"--allowlist") next(o.allowlist), o.rawArgs.push_back(o.allowlist);
         else if (a == L"--diff" && i + 2 < argc) {

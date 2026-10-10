@@ -284,6 +284,11 @@ namespace hm
             err = "cannot read file from disk";
             return false;
         }
+        return LoadBytesAsImage(file, actualBase, out, err);
+    }
+
+    bool LoadBytesAsImage(const std::vector<uint8_t>& file, uint64_t actualBase, std::vector<uint8_t>& out, std::string& err)
+    {
         uint32_t ntOff = 0;
         auto nt = NtHeaders(file.data(), file.size(), &ntOff);
         if (!nt) {
@@ -346,6 +351,41 @@ namespace hm
         auto ntOut = reinterpret_cast<IMAGE_NT_HEADERS64*>(out.data() + ntOff);
         ntOut->OptionalHeader.ImageBase = actualBase;
         return true;
+    }
+
+    std::vector<uint32_t> FunctionStarts(const uint8_t* image, size_t size)
+    {
+        std::vector<uint32_t> out;
+        auto nt = NtHeaders(image, size, nullptr);
+        if (!nt || nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXCEPTION) return out;
+        auto& d = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+        if (!d.VirtualAddress || (uint64_t)d.VirtualAddress + d.Size > size) return out;
+        uint32_t n = d.Size / 12;  // RUNTIME_FUNCTION: begin, end, unwind
+        out.reserve(n);
+        for (uint32_t i = 0; i < n; ++i) {
+            uint32_t begin;
+            std::memcpy(&begin, image + d.VirtualAddress + i * 12, 4);
+            if (begin) out.push_back(begin);
+        }
+        std::sort(out.begin(), out.end());
+        out.erase(std::unique(out.begin(), out.end()), out.end());
+        return out;
+    }
+
+    uint32_t RvaToFileOffset(const std::vector<uint8_t>& file, uint32_t rva)
+    {
+        auto nt = NtHeaders(file.data(), file.size(), nullptr);
+        if (!nt) return 0;
+        auto sec = IMAGE_FIRST_SECTION(nt);
+        for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+            uint32_t va = sec[i].VirtualAddress;
+            uint32_t sz = std::max<uint32_t>(sec[i].Misc.VirtualSize, sec[i].SizeOfRawData);
+            if (rva >= va && rva < va + sz) {
+                uint32_t off = sec[i].PointerToRawData + (rva - va);
+                return (rva - va) < sec[i].SizeOfRawData && off < file.size() ? off : 0;
+            }
+        }
+        return 0;
     }
 
     std::string ToolsetFromBuild(uint16_t b)

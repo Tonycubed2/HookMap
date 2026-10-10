@@ -33,10 +33,11 @@ namespace hm
     class NameDb
     {
     public:
-        bool LoadCommonLib(const std::wstring& root, std::string& err);
+        // se = true picks the SE (1.5.x) ID column instead of the AE one.
+        bool LoadCommonLib(const std::wstring& root, bool se, std::string& err);
         void ResolveVtables(const AddressLib& lib);
 
-        std::string NameOf(uint64_t aeId) const;
+        std::string NameOf(uint64_t id) const;
         // Vtable containing rva (within 0x800 bytes of its start): name + slot index.
         std::optional<std::pair<std::string, uint32_t>> VtableSlot(uint64_t rva) const;
 
@@ -46,7 +47,8 @@ namespace hm
 
     private:
         void ParseFile(const std::string& text, const std::string& fileStem);
-        void Add(uint64_t aeId, const std::string& name, bool declared);
+        void Add(uint64_t id, const std::string& name, bool declared);
+        bool se_ = false;
 
         std::unordered_map<uint64_t, std::pair<std::string, bool>> names_;  // id -> (name, declared)
         std::vector<std::pair<uint64_t, std::string>>              vtableIds_;

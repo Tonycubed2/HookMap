@@ -84,6 +84,7 @@ namespace hm
         w.S("names", r.names);
         w.S("mo2", r.mo2);
         w.S("skseLogFile", r.skseLogFile);
+        w.S("baseline", r.baseline);
         w.B("shared", r.shared);
         w.L("notes", r.notes);
 
@@ -199,6 +200,7 @@ namespace hm
         r.names = v.GetStr("names");
         r.mo2 = v.GetStr("mo2");
         r.skseLogFile = v.GetStr("skseLogFile");
+        r.baseline = v.GetStr("baseline");
         r.shared = v.GetBool("shared");
         r.notes = v.GetStrList("notes");
         if (auto a = v.Get("modules"); a && a->type == json::Value::kArray)
@@ -309,7 +311,7 @@ namespace hm
     void Sanitize(Report& r, const std::vector<std::pair<std::wstring, std::wstring>>& repl)
     {
         r.shared = true;
-        for (auto* s : { &r.gameExe, &r.processInfo, &r.addrLib, &r.names, &r.mo2, &r.skseLogFile }) ReplaceI(*s, repl);
+        for (auto* s : { &r.gameExe, &r.processInfo, &r.addrLib, &r.names, &r.mo2, &r.skseLogFile, &r.baseline }) ReplaceI(*s, repl);
         ReplaceI(r.notes, repl);
         for (auto& m : r.modules)
             for (auto* s : { &m.path, &m.physPath, &m.source, &m.pdb, &m.clibEvidence, &m.scanNote, &m.compat, &m.skseLog })
@@ -478,6 +480,7 @@ ul.notes{margin:6px 0;padding-left:20px;color:var(--mute)}
         };
         meta("Game", r.gameVersion + (r.gameExe.empty() ? "" : " — " + r.gameExe));
         meta("Process", r.processInfo);
+        meta("Game code compared against", r.baseline);
         meta("Address Library", r.addrLib);
         meta("Function names", r.names);
         meta("MO2", r.mo2);

@@ -16,6 +16,7 @@ namespace hm
         bool         pauseAtEnd = false;
         std::wstring addrlib;    // file or folder
         std::wstring clib;       // CommonLibSSE-NG root for names
+        std::wstring cleanExe;   // unencrypted SkyrimSE.exe to compare against
         std::wstring mo2;        // MO2 instance folder
         std::wstring outDir;
         std::wstring allowlist;

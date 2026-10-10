@@ -110,6 +110,13 @@ namespace hm
 
     // Reads a PE file from disk and lays it out the way the loader would, with base relocations applied.
     bool LoadFileAsImage(const std::wstring& path, uint64_t actualBase, std::vector<uint8_t>& out, std::string& err);
+    bool LoadBytesAsImage(const std::vector<uint8_t>& file, uint64_t actualBase, std::vector<uint8_t>& out, std::string& err);
+
+    // Function start addresses (RVAs) from the exception directory (.pdata), sorted.
+    std::vector<uint32_t> FunctionStarts(const uint8_t* image, size_t size);
+
+    // File offset of an RVA in a raw (on-disk layout) PE; 0 if not mapped.
+    uint32_t RvaToFileOffset(const std::vector<uint8_t>& file, uint32_t rva);
 
     // MSVC toolset guess from a Rich header compiler build number.
     std::string ToolsetFromBuild(uint16_t build);

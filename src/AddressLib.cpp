@@ -275,6 +275,7 @@ namespace hm
                     if (i >= t.size() || t[i] != ',') continue;
                     ++i;
                     if (!ReadNumber(t, i, ae)) continue;
+                    if (se_) ae = se;  // "ae" below means "the ID column for the running game"
 
                     // scope path
                     std::string path;
@@ -323,8 +324,9 @@ namespace hm
         }
     }
 
-    bool NameDb::LoadCommonLib(const std::wstring& dir, std::string& err)
+    bool NameDb::LoadCommonLib(const std::wstring& dir, bool se, std::string& err)
     {
+        se_ = se;
         namespace fs = std::filesystem;
         std::vector<fs::path> roots = { fs::path(dir) / L"include" / L"RE", fs::path(dir) / L"src" / L"RE",
             fs::path(dir) / L"include" / L"REL", fs::path(dir) / L"include" / L"SKSE" };

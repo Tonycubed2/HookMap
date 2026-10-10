@@ -18,6 +18,7 @@ add_executable(HookMap
     src/Analyzer.cpp
     src/Report.cpp
     src/Json.cpp
+    src/SteamStub.cpp
 )
 
 target_compile_definitions(HookMap PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS PSAPI_VERSION=2)
@@ -29,7 +30,7 @@ else()
     target_link_options(HookMap PRIVATE -municode -static)
 endif()
 
-target_link_libraries(HookMap PRIVATE version shell32 advapi32)
+target_link_libraries(HookMap PRIVATE version shell32 advapi32 bcrypt)
 
 # Ship the editable allowlist next to the exe.
 add_custom_command(TARGET HookMap POST_BUILD

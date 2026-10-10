@@ -3,6 +3,7 @@
 #include "AddressLib.h"
 #include "Disasm.h"
 #include "PEImage.h"
+#include "SteamStub.h"
 
 #include <winver.h>
 
@@ -126,6 +127,8 @@ namespace hm
             std::vector<int>      neighbors;
             bool        neighborsBuilt = false;
             bool        registersVeh = false;
+            bool        noBaseline = false;   // code compared without a clean copy (game only)
+            std::vector<uint64_t> funcStarts;   // absolute addresses from .pdata
 
             bool PageOk(uint64_t rva) const
             {
@@ -155,6 +158,7 @@ namespace hm
             std::vector<uint64_t> hops;
             std::vector<uint64_t> thunkRefs;
             std::vector<uint8_t>  newBytes;
+            bool     noBaseline = false;
         };
 
         struct Resolved
@@ -217,6 +221,10 @@ namespace hm
             void BuildDataRefs();
             void ScanModule(int mi);
             void ScanCode(int mi, const std::vector<uint8_t>& disk, const PESection& sec, size_t& budget);
+            bool GameBaseline(int mi, std::vector<uint8_t>& disk);
+            size_t CodeDiff(const Mod& m, const std::vector<uint8_t>& disk) const;
+            void ScanCodeNoBaseline(int mi, const PESection& sec, size_t& budget);
+            bool IsFuncStart(int m, uint64_t a) const { return m >= 0 && SortedContains(mods_[m].funcStarts, a); }
             void AnalyzeCodeRange(int mi, const std::vector<uint8_t>& disk, uint32_t a, uint32_t b, size_t& budget);
             void ScanRdata(int mi, const std::vector<uint8_t>& disk, const PESection& sec, size_t& budget);
             void CheckIats();
@@ -463,6 +471,8 @@ namespace hm
                 }
                 for (auto& s : m.pe.sections)
                     if (s.Exec()) m.exec.push_back({ m.e.base + s.va, m.e.base + s.va + s.Size() });
+                if (!m.windows)
+                    for (auto rva : FunctionStarts(m.img.data(), m.img.size())) m.funcStarts.push_back(m.e.base + rva);
             }
             printf("\n");
         }
@@ -590,7 +600,8 @@ namespace hm
                 return;
             }
             std::string err;
-            if (!names_.LoadCommonLib(root, err)) {
+            bool se = runtimePacked_ && runtimePacked_ < PackVersion(1, 6, 0, 0);
+            if (!names_.LoadCommonLib(root, se, err)) {
                 rep_.names = "CommonLib names unavailable: " + err;
                 return;
             }
@@ -825,7 +836,21 @@ namespace hm
                 r.compat = "SE-era plugin (SKSEPlugin_Query only) — AE builds of SKSE normally refuse these";
                 r.compatStatus = (runtimePacked_ >= PackVersion(1, 6, 0, 0)) ? "bad" : "ok";
             }
-            if (IStartsWith(m.e.name, L"skse64_") && !runtimeStr_.empty()) {
+
+            // SE runtime (1.5.x): SKSE calls SKSEPlugin_Query, and the plugin checks the game version there itself.
+            // SKSEPlugin_Version data is for AE's SKSE and doesn't apply.
+            if (runtimePacked_ && runtimePacked_ < PackVersion(1, 6, 0, 0) && (r.skseLoadExport || r.skseVersionExport)) {
+                if (r.skseQueryExport) {
+                    r.compat = "SE plugin interface (SKSEPlugin_Query) — the plugin checks the game version itself when SKSE "
+                               "loads it";
+                    r.compatStatus = "ok";
+                } else {
+                    r.compat = "AE-only plugin (no SKSEPlugin_Query) — SE's SKSE doesn't load these, so something else did";
+                    r.compatStatus = "warn";
+                }
+            }
+            // skse64_1_5_97.dll / skse64_1_6_1170.dll (not skse64_steam_loader.dll)
+            if (IStartsWith(m.e.name, L"skse64_") && m.e.name.size() > 7 && iswdigit(m.e.name[7]) && !runtimeStr_.empty()) {
                 std::string expect = "skse64_" + std::to_string(runtimePacked_ >> 24) + "_" +
                                      std::to_string((runtimePacked_ >> 16) & 0xFF) + "_" +
                                      std::to_string((runtimePacked_ >> 4) & 0xFFF) + ".dll";
@@ -869,18 +894,222 @@ namespace hm
             if (!m.read || (!m.scanCode && !m.scanRdata)) return;
             std::vector<uint8_t> disk;
             std::string err;
-            if (!LoadFileAsImage(m.e.physPath, m.e.base, disk, err)) {
+            if (m.game) {
+                if (!GameBaseline(mi, disk)) return;
+            } else if (!LoadFileAsImage(m.e.physPath, m.e.base, disk, err)) {
                 m.rec.scanNote = "not scanned: " + err + " (" + W2U(m.e.physPath) + ")";
                 return;
             }
             size_t budget = kMaxPatchesPerModule;
             for (auto& s : m.pe.sections) {
-                if (m.scanCode && s.Exec()) ScanCode(mi, disk, s, budget);
+                if (m.scanCode && s.Exec()) {
+                    if (m.noBaseline) ScanCodeNoBaseline(mi, s, budget);
+                    else ScanCode(mi, disk, s, budget);
+                }
                 if (m.scanRdata && !s.Exec() && !s.Write() && s.InitData() && s.name != ".rsrc" && s.name != ".reloc" &&
                     s.name != ".pdata")
                     ScanRdata(mi, disk, s, budget);
             }
             if (budget == 0) m.rec.scanNote += (m.rec.scanNote.empty() ? "" : "; ") + std::string("patch list truncated at 5000");
+        }
+
+        // Bytes of executable code that differ between the running module and a baseline image.
+        size_t Engine::CodeDiff(const Mod& m, const std::vector<uint8_t>& disk) const
+        {
+            size_t diff = 0;
+            for (auto& s : m.pe.sections) {
+                if (!s.Exec()) continue;
+                uint32_t b = (uint32_t)std::min<size_t>({ (size_t)s.va + s.Size(), m.img.size(), disk.size() });
+                for (uint32_t pg = s.va; pg < b; pg = (pg | 0xFFF) + 1) {
+                    if (!m.PageOk(pg)) continue;
+                    uint32_t e = std::min<uint32_t>((pg | 0xFFF) + 1, b);
+                    if (std::memcmp(m.img.data() + pg, disk.data() + pg, e - pg) == 0) continue;
+                    for (uint32_t k = pg; k < e; ++k) diff += m.img[k] != disk[k];
+                }
+            }
+            return diff;
+        }
+
+        // Builds the clean image SkyrimSE.exe is compared against: --clean-exe, the exe on disk, or the exe on disk
+        // with Steam's DRM encryption undone. Falls back to baseline-free code scanning when none matches.
+        bool Engine::GameBaseline(int mi, std::vector<uint8_t>& disk)
+        {
+            Mod& m = mods_[mi];
+            size_t codeSize = 0;
+            for (auto& s : m.pe.sections)
+                if (s.Exec()) codeSize += s.Size();
+            const size_t limit = std::max<size_t>(65536, codeSize / 50);
+            std::string err;
+
+            if (!opt_.cleanExe.empty()) {
+                if (LoadFileAsImage(opt_.cleanExe, m.e.base, disk, err) && CodeDiff(m, disk) <= limit) {
+                    rep_.baseline = "clean exe given with --clean-exe (" + W2U(FileNameOf(opt_.cleanExe)) + ")";
+                    return true;
+                }
+                rep_.notes.push_back("--clean-exe file doesn't match the running game" + (err.empty() ? "" : " (" + err + ")") +
+                                     "; ignoring it.");
+            }
+
+            std::vector<uint8_t> file;
+            if (!ReadFileBytes(m.e.physPath, file) || !LoadBytesAsImage(file, m.e.base, disk, err)) {
+                m.rec.scanNote = "not scanned: cannot read " + W2U(m.e.physPath);
+                return false;
+            }
+            size_t diff = CodeDiff(m, disk);
+            if (diff <= limit) {
+                rep_.baseline = "SkyrimSE.exe on disk (not DRM-encrypted)";
+                return true;
+            }
+
+            printf("  SkyrimSE.exe is encrypted on disk, decrypting for comparison...\n");
+            SteamStubResult ss = DecryptSteamStub(file);
+            size_t best = diff;
+            std::vector<uint8_t> bestImg;
+            if (!ss.plaintexts.empty()) {
+                uint32_t rawOff = RvaToFileOffset(file, ss.codeRva);
+                for (auto& pt : ss.plaintexts)
+                    for (size_t skip : { (size_t)0, (size_t)16 }) {
+                        if (!rawOff || pt.size() <= skip) continue;
+                        std::vector<uint8_t> f2 = file;
+                        size_t n = std::min({ pt.size() - skip, f2.size() - rawOff, (size_t)ss.codeRawSize });
+                        std::memcpy(f2.data() + rawOff, pt.data() + skip, n);
+                        std::vector<uint8_t> img;
+                        if (!LoadBytesAsImage(f2, m.e.base, img, err)) continue;
+                        size_t d = CodeDiff(m, img);
+                        if (d < best) {
+                            best = d;
+                            bestImg = std::move(img);
+                        }
+                    }
+            }
+            if (!bestImg.empty() && best <= limit) {
+                disk = std::move(bestImg);
+                rep_.baseline = "SkyrimSE.exe on disk, Steam DRM decrypted in memory";
+                return true;
+            }
+
+            m.noBaseline = true;
+            rep_.baseline = "none — code hooks found by checking where calls and jumps lead (" +
+                            (ss.wrapped ? std::string("Steam DRM found, but couldn't decrypt it to a copy that matches")
+                                        : std::string("exe on disk doesn't match the running game")) +
+                            ")";
+            rep_.notes.push_back(
+                "No clean copy of SkyrimSE.exe matched the running game, so hooks in game code were found by looking for calls and "
+                "jumps that lead into DLLs. Byte patches in game code can't be seen in this mode, and chain/overwrite analysis "
+                "isn't available for code hooks. Run HookMap with --clean-exe pointing at an unencrypted copy of this exact "
+                "SkyrimSE.exe for a full scan.");
+            return true;
+        }
+
+        // Without a baseline: a direct call/jump from game code to a function start in a DLL, or to a trampoline stub
+        // or thunk that leads to one, is never part of the original exe.
+        void Engine::ScanCodeNoBaseline(int mi, const PESection& sec, size_t& budget)
+        {
+            Mod& m = mods_[mi];
+            const auto& mem = m.img;
+            uint32_t a = sec.va;
+            uint32_t b = (uint32_t)std::min<size_t>((size_t)sec.va + sec.Size(), mem.size());
+            const uint64_t lo = m.e.base, hi = m.e.base + m.e.size;
+            auto nearSite = [&](uint64_t site, const std::vector<uint64_t>& refs) {
+                for (auto r : refs) {
+                    if (r >= site - 0x400 && r <= site + 0x400) return true;
+                    if (r >= lo && r < hi && IsFuncStart(mi, r)) return true;
+                }
+                return false;
+            };
+            auto blobStart = [&](uint64_t t) {
+                size_t av = 0;
+                int r = PrivAt(t);
+                if (r < 0) return false;
+                if (t == priv_[r].base) return true;
+                const uint8_t* p = PrivBytes(t - 1, av);
+                if (p && (p[0] == 0xC3 || p[0] == 0xCC)) return true;
+                if (t - 14 >= priv_[r].base) {
+                    p = PrivBytes(t - 14, av);
+                    if (p && p[0] == 0xFF && p[1] == 0x25 && !p[2] && !p[3] && !p[4] && !p[5]) return true;
+                }
+                if (t - 5 >= priv_[r].base) {
+                    p = PrivBytes(t - 5, av);
+                    if (p && p[0] == 0xE9) return true;
+                }
+                return false;
+            };
+
+            for (uint32_t i = a; i + 5 <= b && budget;) {
+                if (!m.PageOk(i)) {
+                    i = (i | 0xFFF) + 1;
+                    continue;
+                }
+                uint8_t op = mem[i];
+                if (op != 0xE8 && op != 0xE9 && op != 0xFF && op != 0x48 && op != 0x49) {
+                    ++i;
+                    continue;
+                }
+                uint64_t site = m.e.base + i;
+                Branch br = DecodeBranch(mem.data() + i, std::min<size_t>(32, mem.size() - i), site);
+                uint64_t t = br.target;
+                if (br.kind == BrKind::JmpInd) {
+                    // only the inline absolute form: jmp [rip+0] ; dq target
+                    if (br.slot != site + 6) br.kind = BrKind::None;
+                    else {
+                        std::memcpy(&t, mem.data() + i + 6, 8);
+                        br.len = 14;
+                    }
+                }
+                bool candidate = (br.kind == BrKind::Call || br.kind == BrKind::Jmp || br.kind == BrKind::JmpInd ||
+                                     br.kind == BrKind::AbsJmp || br.kind == BrKind::AbsCall) &&
+                                 br.len >= 5 && (t < lo || t >= hi);
+                if (!candidate) {
+                    ++i;
+                    continue;
+                }
+
+                int tm = ModAt(t);
+                int owner = -1;
+                std::string how;
+                Resolved res;
+                if (Eligible(tm) && IsFuncStart(tm, t)) {
+                    owner = tm;
+                    how = "direct";
+                } else if (tm < 0 && PrivAt(t) >= 0) {
+                    res = Resolve(t);
+                    if (Eligible(res.mod)) {
+                        bool viaJump = res.how == "via trampoline";
+                        if (viaJump && IsFuncStart(res.mod, res.final)) owner = res.mod, how = res.how;
+                        else if (!viaJump && blobStart(t) && nearSite(site, res.thunkRefs)) owner = res.mod, how = res.how;
+                    }
+                }
+                if (owner < 0) {
+                    ++i;
+                    continue;
+                }
+
+                uint32_t len = (uint32_t)br.len;
+                size_t pad = i + len < b ? std::min<size_t>(PaddingLen(mem.data() + i + len, mem.size() - i - len), b - i - len) : 0;
+                PatchRec rec;
+                PInfo info;
+                rec.inModule = W2U(m.e.name);
+                rec.rva = i;
+                rec.len = len + (uint32_t)pad;
+                rec.kind = br.kind == BrKind::JmpInd ? "abs jmp" : BrKindName(br.kind);
+                rec.kindNote = "found without a clean exe";
+                rec.origBytes = "(no clean copy)";
+                rec.newBytes = HexBytes(mem.data() + i, rec.len);
+                rec.target = AddrText(res.final ? res.final : t);
+                rec.owner = W2U(mods_[owner].e.name);
+                rec.ownerHow = how;
+                info.mod = mi;
+                info.site = site;
+                info.newTarget = t;
+                info.owner = owner;
+                info.hook = true;
+                info.noBaseline = true;
+                info.hops = res.hops;
+                info.thunkRefs = res.thunkRefs;
+                AddPatch(std::move(rec), std::move(info));
+                --budget;
+                i += len + (uint32_t)pad;
+            }
         }
 
         void Engine::ScanCode(int mi, const std::vector<uint8_t>& disk, const PESection& sec, size_t& budget)
@@ -1366,6 +1595,10 @@ namespace hm
             for (auto& pi : pinfo_) {
                 auto& pr = rep_.patches[pi.patch];
                 if (pi.isIat) continue;
+                if (pi.noBaseline) {
+                    pr.chainStatus = "unknown — no clean copy of SkyrimSE.exe to compare against";
+                    continue;
+                }
                 if (!pi.hook || pi.owner < 0 || !Eligible(pi.owner)) {
                     if (pr.chainStatus.empty()) pr.chainStatus = pi.hook ? "n/a" : "";
                     continue;
@@ -1791,7 +2024,7 @@ namespace hm
             LoadNames();
 
             for (auto& m : mods_)
-                if (IStartsWith(m.e.name, L"skse64_")) {
+                if (IStartsWith(m.e.name, L"skse64_") && m.e.name.size() > 7 && iswdigit(m.e.name[7])) {
                     FileVer fv = GetFileVer(m.e.physPath);
                     // SKSE stamps its DLL as 0.major.minor.beta (2.2.6 -> 0.2.2.6); plugins request 2.2.x.
                     if (fv.ok)

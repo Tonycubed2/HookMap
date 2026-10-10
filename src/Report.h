@@ -76,7 +76,7 @@ namespace hm
     {
         std::string tool = kToolName, toolVersion = kToolVersion;
         std::string generated, gameVersion, gameExe, processInfo;
-        std::string addrLib, names, mo2, skseLogFile;
+        std::string addrLib, names, mo2, skseLogFile, baseline;
         bool        shared = false;
         std::vector<std::string> notes;
         std::vector<ModuleRec>   modules;

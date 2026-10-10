@@ -1,6 +1,6 @@
 # HookMap
 
-A standalone tool that scans a running Skyrim SE/AE and shows which SKSE DLLs hook what, and where they collide: overwritten hooks, shared hooks, crash-handler stacking, version mismatches and overlay hooks. It produces a ranked HTML report, a JSON export, and can diff two scans.
+A standalone tool that scans a running Skyrim SE (1.5.97) or AE (1.6.x) and shows which SKSE DLLs hook what, and where they collide: overwritten hooks, shared hooks, crash-handler stacking, version mismatches and overlay hooks. It produces a ranked HTML report, a JSON export, and can diff two scans.
 
 HookMap only **reads** the game's memory. It is not an SKSE plugin and installs nothing into the game.
 
@@ -27,11 +27,12 @@ DLLs that patch heavily by design (SKSE, Engine Fixes, overlays…). Findings th
 ## How it works
 
 - Compares each module's code (and the game's vtables) in memory against the file on disk, with relocations applied.
+- The Steam SkyrimSE.exe is DRM-encrypted on disk; HookMap decrypts it in memory to get a clean copy (nothing is written). If that fails it falls back to finding calls/jumps that lead into DLLs, or you can pass `--clean-exe` with an unencrypted copy.
 - Follows each redirected call/jump/pointer through trampolines and thunks to the DLL that owns it.
 - Byte patches are attributed by finding the patch bytes in a DLL's data.
 - Chain analysis: checks whether a hook's owner holds the original target (calls through), chains to another hook, or overwrote an earlier hook whose trampoline stub is now unreferenced.
 - Reads each SKSE plugin's version data, the PE headers (Rich header, imports, debug info) and `skse64.log`.
-- Names locations via Address Library IDs and, if `CommonLibSSEPath_NG` is set, names harvested from CommonLibSSE-NG sources.
+- Names locations via Address Library IDs (SE or AE database, matching the running game) and, if `CommonLibSSEPath_NG` is set, names harvested from CommonLibSSE-NG sources.
 
 ## Building
 
