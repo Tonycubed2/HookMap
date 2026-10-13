@@ -13,16 +13,16 @@ namespace
         "HookMap %s - maps which DLLs hook what in a running Skyrim SE/AE, and where they collide.\n"
         "\n"
         "Usage:\n"
-        "  HookMap.exe [options]                     scan the running SkyrimSE.exe\n"
+        "  HookMap.exe [options]                     scan the running SkyrimSE.exe or SkyrimVR.exe\n"
         "  HookMap.exe --diff OLD.json NEW.json      compare two earlier scans\n"
         "\n"
         "Options:\n"
-        "  --pid N            scan this process id instead of finding SkyrimSE.exe\n"
-        "  --wait             wait for SkyrimSE.exe to start, then scan\n"
+        "  --pid N            scan this process id instead of finding the game\n"
+        "  --wait             wait for the game to start, then scan\n"
         "  --addrlib PATH     Address Library .bin file, or the folder that holds it\n"
         "  --clib DIR         CommonLibSSE-NG folder for function/vtable names\n"
         "                     (default: CommonLibSSEPath_NG environment variable)\n"
-        "  --clean-exe FILE   unencrypted copy of the running SkyrimSE.exe to compare against\n"
+        "  --clean-exe FILE   unencrypted copy of the running game exe to compare against\n"
         "                     (only needed if HookMap can't decrypt the Steam exe itself)\n"
         "  --mo2 DIR          MO2 instance folder (normally detected automatically)\n"
         "  --allowlist FILE   allowlist file (default: allowlist.txt next to HookMap.exe)\n"
@@ -143,22 +143,23 @@ namespace
     {
         DWORD pid = o.pid;
         if (!pid) {
-            auto found = FindProcesses({ L"SkyrimSE.exe" });
+            const std::vector<std::wstring> kGames = { L"SkyrimSE.exe", L"SkyrimVR.exe" };
+            auto found = FindProcesses(kGames);
             if (found.empty() && o.wait) {
-                printf("Waiting for SkyrimSE.exe to start (Ctrl+C to cancel)...\n");
+                printf("Waiting for Skyrim (SkyrimSE.exe or SkyrimVR.exe) to start (Ctrl+C to cancel)...\n");
                 while (found.empty()) {
                     Sleep(2000);
-                    found = FindProcesses({ L"SkyrimSE.exe" });
+                    found = FindProcesses(kGames);
                 }
                 printf("Found it. Giving it 20 seconds to finish loading plugins...\n");
                 Sleep(20000);
             }
             if (found.empty()) {
-                printf("SkyrimSE.exe is not running. Start the game (ideally load a save), then run HookMap again,\n"
+                printf("Skyrim (SkyrimSE.exe or SkyrimVR.exe) is not running. Start the game (ideally load a save), then run HookMap again,\n"
                        "or use --wait to have HookMap wait for it.\n");
                 return 1;
             }
-            if (found.size() > 1) printf("Several SkyrimSE.exe processes found; scanning PID %lu.\n", found.front().pid);
+            if (found.size() > 1) printf("Several Skyrim processes found; scanning %s, PID %lu.\n", W2U(found.front().exe).c_str(), found.front().pid);
             pid = found.front().pid;
         }
 

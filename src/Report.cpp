@@ -548,8 +548,10 @@ ul.notes{margin:6px 0;padding-left:20px;color:var(--mute)}
             if (!byMod.count(p.inModule)) order.push_back(p.inModule);
             byMod[p.inModule].push_back(&p);
         }
+        std::string gameMod = "SkyrimSE.exe";
+        if (auto sl = r.gameExe.find_last_of("\\/"); !r.gameExe.empty()) gameMod = r.gameExe.substr(sl == std::string::npos ? 0 : sl + 1);
         std::stable_sort(order.begin(), order.end(), [&](const std::string& a, const std::string& b) {
-            if ((a == "SkyrimSE.exe") != (b == "SkyrimSE.exe")) return a == "SkyrimSE.exe";
+            if ((a == gameMod) != (b == gameMod)) return a == gameMod;
             return byMod[a].size() > byMod[b].size();
         });
         if (order.empty()) h += "<div class=empty>No patched code found. Make sure the game is past the main menu or in a loaded save.</div>";
@@ -557,7 +559,7 @@ ul.notes{margin:6px 0;padding-left:20px;color:var(--mute)}
             auto& list = byMod[mod];
             std::map<std::string, int> owners;
             for (auto p : list) owners[p->owner]++;
-            h += std::string("<details class=grp") + (mod == "SkyrimSE.exe" ? " open" : "") + "><summary><span class=name>" + E(mod) +
+            h += std::string("<details class=grp") + (mod == gameMod ? " open" : "") + "><summary><span class=name>" + E(mod) +
                  "</span><span class=mute>" + std::to_string(list.size()) + " patch(es) · " + std::to_string(owners.size()) +
                  " owner(s)</span></summary><div class=tw><table><thead><tr><th>#</th><th>Location</th><th>Kind</th><th>Owner</th>"
                  "<th>Chain</th><th>Bytes (original → now)</th></tr></thead><tbody>";

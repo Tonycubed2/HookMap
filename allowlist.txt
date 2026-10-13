@@ -4,6 +4,7 @@
 # Edit freely; no rebuild needed.
 
 skse64_*.dll            | SKSE core: hooks the game by design
+sksevr_*.dll            | SKSE VR core: hooks the game by design
 EngineFixes.dll         | SSE Engine Fixes: patches dozens of sites by design
 SSEDisplayTweaks.dll    | SSE Display Tweaks: frame timing and display patches
 po3_Tweaks.dll          | powerofthree's Tweaks: many small engine fixes

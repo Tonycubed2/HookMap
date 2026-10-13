@@ -99,6 +99,68 @@ namespace hm
         return true;
     }
 
+    bool AddressLib::LoadCsv(const std::wstring& file, const std::vector<uint32_t>& funcStarts, uint64_t imageBase, std::string& err)
+    {
+        std::string text;
+        if (!ReadFileText(file, text)) {
+            err = "cannot read " + W2U(file);
+            return false;
+        }
+        struct Row
+        {
+            uint64_t    id;
+            std::string off;
+        };
+        std::vector<Row> rows;
+        bool sawHexDigit = false;
+        size_t pos = 0;
+        while (pos < text.size()) {
+            size_t nl = text.find('\n', pos);
+            std::string line = Trim(text.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos));
+            pos = nl == std::string::npos ? text.size() : nl + 1;
+            size_t comma = line.find(',');
+            if (comma == std::string::npos) continue;
+            std::string a = Trim(line.substr(0, comma)), b = Trim(line.substr(comma + 1));
+            if (auto c2 = b.find(','); c2 != std::string::npos) b = Trim(b.substr(0, c2));
+            if (a.empty() || b.empty() || b.find('.') != std::string::npos) continue;  // header / version line
+            if (!std::all_of(a.begin(), a.end(), [](char c) { return isdigit((unsigned char)c); })) continue;
+            if (b.size() > 2 && b[0] == '0' && (b[1] == 'x' || b[1] == 'X')) b = b.substr(2), sawHexDigit = true;
+            if (!std::all_of(b.begin(), b.end(), [](char c) { return isxdigit((unsigned char)c); })) continue;
+            if (std::any_of(b.begin(), b.end(), [](char c) { return isalpha((unsigned char)c); })) sawHexDigit = true;
+            rows.push_back({ strtoull(a.c_str(), nullptr, 10), b });
+        }
+        if (rows.empty()) {
+            err = "no id,offset rows found";
+            return false;
+        }
+        auto parse = [&](const std::string& s, int radix) {
+            uint64_t v = strtoull(s.c_str(), nullptr, radix);
+            if (imageBase && v >= imageBase) v -= imageBase;
+            return v;
+        };
+        int radix = 16;
+        if (!sawHexDigit && !funcStarts.empty()) {
+            size_t hits[2]{};
+            for (size_t i = 0; i < rows.size(); i += std::max<size_t>(1, rows.size() / 4000))
+                for (int k = 0; k < 2; ++k) {
+                    uint64_t v = parse(rows[i].off, k ? 10 : 16);
+                    hits[k] += v < 0xFFFFFFFF && std::binary_search(funcStarts.begin(), funcStarts.end(), (uint32_t)v);
+                }
+            radix = hits[1] > hits[0] ? 10 : 16;
+        }
+        byOffset_.clear();
+        idToOffset_.clear();
+        for (auto& r : rows) {
+            uint64_t off = parse(r.off, radix);
+            byOffset_.push_back({ off, r.id });
+            idToOffset_[r.id] = off;
+        }
+        std::sort(byOffset_.begin(), byOffset_.end());
+        format = 3;
+        path = file;
+        return true;
+    }
+
     std::optional<AddressLib::Hit> AddressLib::Nearest(uint64_t rva) const
     {
         auto it = std::upper_bound(byOffset_.begin(), byOffset_.end(), std::make_pair(rva, UINT64_MAX));

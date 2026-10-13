@@ -8,6 +8,9 @@ namespace hm
     {
     public:
         bool Load(const std::wstring& path, std::string& err);
+        // Skyrim VR's Address Library is a CSV of "SE id, VR offset". funcStarts (sorted RVAs from .pdata) are used to
+        // tell hex from decimal offsets; imageBase lets absolute addresses be accepted too.
+        bool LoadCsv(const std::wstring& path, const std::vector<uint32_t>& funcStarts, uint64_t imageBase, std::string& err);
         bool Loaded() const { return !byOffset_.empty(); }
 
         struct Hit

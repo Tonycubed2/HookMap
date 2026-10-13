@@ -84,6 +84,17 @@ namespace hm
                 };
                 fv.product = query(L"ProductName");
                 fv.company = query(L"CompanyName");
+                // Skyrim VR's numeric version field says 1.0.0.0; its FileVersion string has the real 1.4.15.0.
+                std::string sv = query(L"FileVersion");
+                unsigned a = 0, b = 0, c = 0, d = 0;
+                if ((!fv.ok || (fv.v[0] == 1 && fv.v[1] == 0 && fv.v[2] == 0 && fv.v[3] == 0)) &&
+                    sscanf(sv.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4 && (a || b || c || d)) {
+                    fv.v[0] = a, fv.v[1] = b, fv.v[2] = c, fv.v[3] = d;
+                    fv.ok = true;
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "%u.%u.%u.%u", a, b, c, d);
+                    fv.text = buf;
+                }
             }
             return fv;
         }
@@ -95,6 +106,7 @@ namespace hm
             L"# Edit freely; no rebuild needed.\r\n"
             L"\r\n"
             L"skse64_*.dll            | SKSE core: hooks the game by design\r\n"
+            L"sksevr_*.dll            | SKSE VR core: hooks the game by design\r\n"
             L"EngineFixes.dll         | SSE Engine Fixes: patches dozens of sites by design\r\n"
             L"SSEDisplayTweaks.dll    | SSE Display Tweaks: frame timing and display patches\r\n"
             L"po3_Tweaks.dll          | powerofthree's Tweaks: many small engine fixes\r\n"
@@ -197,7 +209,9 @@ namespace hm
             uint32_t runtimePacked_ = 0;
             std::string runtimeStr_;
             uint32_t skseCorePacked_ = 0;
-            std::vector<uint8_t> gameDisk_;   // clean SkyrimSE.exe image (empty without a baseline)
+            std::vector<uint8_t> gameDisk_;   // clean game exe image (empty without a baseline)
+            std::string gameName_ = "SkyrimSE.exe";
+            bool vr_ = false;
 
             // ---- helpers
             int ModAt(uint64_t a) const;
@@ -432,12 +446,16 @@ namespace hm
                 Mod m;
                 m.e = e;
                 m.windows = IStartsWith(e.physPath, winDir_ + L"\\");
-                m.game = IEquals(e.name, L"SkyrimSE.exe");
+                m.game = IEquals(e.name, L"SkyrimSE.exe") || IEquals(e.name, L"SkyrimVR.exe");
                 mods_.push_back(std::move(m));
             }
             for (int i = 0; i < (int)mods_.size(); ++i) {
                 modIndex_.push_back({ mods_[i].e.base, i });
-                if (mods_[i].game) gameIdx_ = i;
+                if (mods_[i].game) {
+                    gameIdx_ = i;
+                    gameName_ = W2U(mods_[i].e.name);
+                    vr_ = IEquals(mods_[i].e.name, L"SkyrimVR.exe");
+                }
             }
             std::sort(modIndex_.begin(), modIndex_.end());
             if (gameIdx_ >= 0) gameDir_ = DirOf(mods_[gameIdx_].e.physPath);
@@ -566,7 +584,8 @@ namespace hm
             rep_.gameVersion = fv.text;
             bool ae = fv.v[0] > 1 || (fv.v[0] == 1 && fv.v[1] >= 6);
             wchar_t fname[128];
-            swprintf(fname, 128, ae ? L"versionlib-%u-%u-%u-%u.bin" : L"version-%u-%u-%u-%u.bin", fv.v[0], fv.v[1], fv.v[2], fv.v[3]);
+            swprintf(fname, 128, vr_ ? L"version-%u-%u-%u-%u.csv" : (ae ? L"versionlib-%u-%u-%u-%u.bin" : L"version-%u-%u-%u-%u.bin"),
+                fv.v[0], fv.v[1], fv.v[2], fv.v[3]);
 
             std::vector<std::wstring> cands;
             if (!opt_.addrlib.empty()) {
@@ -584,8 +603,16 @@ namespace hm
             for (auto& c : cands) {
                 if (!FileExists(c)) continue;
                 std::string err;
-                if (alib_.Load(c, err)) {
-                    rep_.addrLib = W2U(c) + " (" + std::to_string(alib_.Count()) + " IDs)";
+                bool ok = false;
+                if (vr_ || IEquals(c.substr(c.size() >= 4 ? c.size() - 4 : 0), L".csv")) {
+                    std::vector<uint32_t> starts;
+                    for (auto a : mods_[gameIdx_].funcStarts) starts.push_back((uint32_t)(a - mods_[gameIdx_].e.base));
+                    ok = alib_.LoadCsv(c, starts, mods_[gameIdx_].pe.preferredBase, err);
+                } else {
+                    ok = alib_.Load(c, err);
+                }
+                if (ok) {
+                    rep_.addrLib = W2U(c) + " (" + std::to_string(alib_.Count()) + " IDs" + (vr_ ? ", SE IDs mapped to VR" : "") + ")";
                     return;
                 }
                 rep_.notes.push_back("Address Library file " + W2U(c) + " failed to load: " + err);
@@ -618,7 +645,7 @@ namespace hm
         {
             if (m.windows) return "Windows";
             if (m.game) return "Game";
-            if (IStartsWith(m.e.name, L"skse64_")) return "SKSE core";
+            if (IStartsWith(m.e.name, L"skse64_") || IStartsWith(m.e.name, L"sksevr_")) return "SKSE core";
             if (m.read && (m.pe.HasExport("SKSEPlugin_Load") || m.pe.HasExport("SKSEPlugin_Version"))) return "SKSE plugin";
             static const wchar_t* kOverlay[] = { L"GameOverlayRenderer64.dll", L"DiscordHook64.dll", L"RTSSHooks64.dll",
                 L"graphics-hook64.dll", L"nvspcap64.dll", L"SpecialK64.dll", L"fraps64.dll", L"owclient.dll", L"*overlay*64*.dll" };
@@ -848,13 +875,15 @@ namespace hm
                                "loads it";
                     r.compatStatus = "ok";
                 } else {
-                    r.compat = "AE-only plugin (no SKSEPlugin_Query) — SE's SKSE doesn't load these, so something else did";
+                    r.compat = std::string("AE-only plugin (no SKSEPlugin_Query) — ") + (vr_ ? "SKSE VR" : "SE's SKSE") +
+                               " doesn't load these, so something else did";
                     r.compatStatus = "warn";
                 }
             }
-            // skse64_1_5_97.dll / skse64_1_6_1170.dll (not skse64_steam_loader.dll)
-            if (IStartsWith(m.e.name, L"skse64_") && m.e.name.size() > 7 && iswdigit(m.e.name[7]) && !runtimeStr_.empty()) {
-                std::string expect = "skse64_" + std::to_string(runtimePacked_ >> 24) + "_" +
+            // skse64_1_5_97.dll / skse64_1_6_1170.dll / sksevr_1_4_15.dll (not skse64_steam_loader.dll)
+            const std::wstring corePrefix = vr_ ? L"sksevr_" : L"skse64_";
+            if (IStartsWith(m.e.name, corePrefix) && m.e.name.size() > 7 && iswdigit(m.e.name[7]) && !runtimeStr_.empty()) {
+                std::string expect = W2U(corePrefix) + std::to_string(runtimePacked_ >> 24) + "_" +
                                      std::to_string((runtimePacked_ >> 16) & 0xFF) + "_" +
                                      std::to_string((runtimePacked_ >> 4) & 0xFFF) + ".dll";
                 if (LowerA(W2U(m.e.name)) == expect) {
@@ -961,11 +990,11 @@ namespace hm
             }
             size_t diff = CodeDiff(m, disk);
             if (diff <= limit) {
-                rep_.baseline = "SkyrimSE.exe on disk (not DRM-encrypted)";
+                rep_.baseline = std::string() + gameName_ + " on disk (not DRM-encrypted)";
                 return true;
             }
 
-            printf("  SkyrimSE.exe is encrypted on disk, decrypting for comparison...\n");
+            printf("  %s is encrypted on disk, decrypting for comparison...\n", gameName_.c_str());
             SteamStubResult ss = DecryptSteamStub(file);
             size_t best = diff;
             std::vector<uint8_t> bestImg;
@@ -988,7 +1017,7 @@ namespace hm
             }
             if (!bestImg.empty() && best <= limit) {
                 disk = std::move(bestImg);
-                rep_.baseline = "SkyrimSE.exe on disk, Steam DRM decrypted in memory";
+                rep_.baseline = std::string() + gameName_ + " on disk, Steam DRM decrypted in memory";
                 return true;
             }
 
@@ -998,10 +1027,10 @@ namespace hm
                                         : std::string("exe on disk doesn't match the running game")) +
                             ")";
             rep_.notes.push_back(
-                "No clean copy of SkyrimSE.exe matched the running game, so hooks in game code were found by looking for calls and "
+                "No clean copy of " + gameName_ + " matched the running game, so hooks in game code were found by looking for calls and "
                 "jumps that lead into DLLs. Byte patches in game code can't be seen in this mode, and chain/overwrite analysis "
-                "isn't available for code hooks. Run HookMap with --clean-exe pointing at an unencrypted copy of this exact "
-                "SkyrimSE.exe for a full scan.");
+                "isn't available for code hooks. Run HookMap with --clean-exe pointing at an unencrypted copy of this exact " +
+                gameName_ + " for a full scan.");
             return true;
         }
 
@@ -1161,11 +1190,11 @@ namespace hm
             }
             size_t secSize = b - a;
             if (diffBytes > std::max<size_t>(65536, secSize / 10)) {
-                std::string what = m.game ? "the on-disk SkyrimSE.exe does not match the running code (packed or DRM-wrapped exe?)"
+                std::string what = m.game ? "the on-disk " + gameName_ + " does not match the running code (packed or DRM-wrapped exe?)"
                                           : "self-modifying or packed module";
                 m.rec.scanNote += (m.rec.scanNote.empty() ? "" : "; ") + std::string("code section ") + sec.name + " skipped: " +
                                   std::to_string(diffBytes) + " bytes differ — " + what;
-                if (m.game) rep_.notes.push_back("Game code scan skipped: " + what + ". Hooks in SkyrimSE.exe cannot be mapped.");
+                if (m.game) rep_.notes.push_back("Game code scan skipped: " + what + ". Hooks in " + gameName_ + " cannot be mapped.");
                 return;
             }
             for (auto& r : ranges) {
@@ -1607,7 +1636,7 @@ namespace hm
                 auto& pr = rep_.patches[pi.patch];
                 if (pi.isIat) continue;
                 if (pi.noBaseline) {
-                    pr.chainStatus = "unknown — no clean copy of SkyrimSE.exe to compare against";
+                    pr.chainStatus = "unknown — no clean copy of " + gameName_ + " to compare against";
                     continue;
                 }
                 if (!pi.hook || pi.owner < 0 || !Eligible(pi.owner)) {
@@ -1897,11 +1926,11 @@ namespace hm
                     names += (names.empty() ? "" : ", ") + n;
                 }
                 auto add = [](std::string& f, const std::string& v) { f += (f.empty() ? "" : "; ") + v; };
-                add(pr.stubAt, names + " trampoline at " + Hex(h.stub) + " (private memory), for site SkyrimSE.exe+" + Hex(h.siteRva));
+                add(pr.stubAt, names + " trampoline at " + Hex(h.stub) + " (private memory), for site " + gameName_ + "+" + Hex(h.siteRva));
                 add(pr.stubMatched, h.matched);
-                add(pr.stubReturns, "jumps back to SkyrimSE.exe+" + Hex(h.cont - gb) + " (jump at " + Hex(h.jmpAt) + ")");
+                add(pr.stubReturns, "jumps back to " + gameName_ + "+" + Hex(h.cont - gb) + " (jump at " + Hex(h.jmpAt) + ")");
                 if (pr.evidenceKind.empty() || overlap) pr.evidenceKind = overlap ? "overlap" : "clobber";
-                pr.chainStatus = overlap ? "overlaps " + names + "'s earlier hook at SkyrimSE.exe+" + Hex(h.siteRva)
+                pr.chainStatus = overlap ? "overlaps " + names + "'s earlier hook at " + gameName_ + "+" + Hex(h.siteRva)
                                          : "overwrote " + names + "'s hook (its trampoline is no longer reached)";
             }
         }
@@ -1926,7 +1955,7 @@ namespace hm
                             else loc += " · " + idTxt;
                         }
                     }
-                    if (loc.empty()) loc = "SkyrimSE.exe+" + Hex(pr.rva);
+                    if (loc.empty()) loc = gameName_ + "+" + Hex(pr.rva);
                     pr.location = loc;
                 } else if (m.read) {
                     if (auto e = m.pe.NearestExport((uint32_t)pr.rva); e && pr.rva - e->rva < 0x4000)
@@ -1941,8 +1970,12 @@ namespace hm
             std::wstring docs = DocumentsDir();
             std::wstring best;
             FILETIME bestT{};
-            for (auto sub : { L"Skyrim Special Edition", L"Skyrim Special Edition GOG" }) {
-                std::wstring p = docs + L"\\My Games\\" + sub + L"\\SKSE\\skse64.log";
+            std::vector<std::wstring> logs;
+            if (vr_) logs = { docs + L"\\My Games\\Skyrim VR\\SKSE\\sksevr.log" };
+            else
+                for (auto sub : { L"Skyrim Special Edition", L"Skyrim Special Edition GOG" })
+                    logs.push_back(docs + L"\\My Games\\" + sub + L"\\SKSE\\skse64.log");
+            for (auto& p : logs) {
                 if (auto t = FileWriteTime(p)) {
                     if (best.empty() || CompareFileTime(&*t, &bestT) > 0) {
                         best = p;
@@ -1951,7 +1984,7 @@ namespace hm
                 }
             }
             if (best.empty()) {
-                rep_.skseLogFile = "skse64.log not found";
+                rep_.skseLogFile = vr_ ? "sksevr.log not found" : "skse64.log not found";
                 return;
             }
             rep_.skseLogFile = W2U(best);
@@ -1990,7 +2023,7 @@ namespace hm
                 c.severity = kMedium;
                 c.category = "skse-log";
                 c.title = "SKSE did not load " + name;
-                c.detail = "skse64.log: " + st;
+                c.detail = (vr_ ? "sksevr.log: " : "skse64.log: ") + st;
                 c.modules = { name };
                 c.key = "skse-log|" + name;
                 rep_.conflicts.push_back(std::move(c));
@@ -2139,7 +2172,7 @@ namespace hm
                     c.severity = kInfo;
                     c.category = "entry-detour";
                     std::string nm = siteText(d);
-                    std::string at = "SkyrimSE.exe+" + Hex(rva);
+                    std::string at = gameName_ + "+" + Hex(rva);
                     c.title = std::to_string(list.size()) + " hook(s) by " + modsText(ow) + " call " + at +
                               (nm != at ? " (" + nm + ")" : std::string()) + ", which is detoured by " + d.owner + ", so " + d.owner +
                               " still runs";
@@ -2306,7 +2339,7 @@ namespace hm
                     ConflictRec c;
                     c.severity = kInfo;
                     c.category = "unattributed";
-                    c.title = std::to_string(list.size()) + " " + kind + " patch(es) in SkyrimSE.exe with no identifiable owner";
+                    c.title = std::to_string(list.size()) + " " + kind + " patch(es) in " + gameName_ + " with no identifiable owner";
                     c.detail = "Usually small fixes (NOP-outs, forced jumps, changed constants) written by fix-it DLLs. "
                                "Their bytes didn't match any DLL's data, so the writer can't be named.";
                     c.patches = list;
@@ -2340,14 +2373,14 @@ namespace hm
             printf("Reading process...\n");
             LoadModules();
             if (gameIdx_ < 0) {
-                rep_.notes.push_back("SkyrimSE.exe module not found in the process.");
+                rep_.notes.push_back("Neither SkyrimSE.exe nor SkyrimVR.exe was found in the process.");
                 return;
             }
             rep_.gameExe = W2U(mods_[gameIdx_].e.physPath);
             {
                 std::string started;
                 if (auto ct = proc_.CreationTime()) started = ", started " + FileTimeToLocalString(*ct);
-                rep_.processInfo = "SkyrimSE.exe, PID " + std::to_string(proc_.Pid()) + started;
+                rep_.processInfo = std::string() + gameName_ + ", PID " + std::to_string(proc_.Pid()) + started;
             }
             FindMo2Roots();
             LoadAllowlist();
@@ -2356,7 +2389,8 @@ namespace hm
             LoadNames();
 
             for (auto& m : mods_)
-                if (IStartsWith(m.e.name, L"skse64_") && m.e.name.size() > 7 && iswdigit(m.e.name[7])) {
+                if ((IStartsWith(m.e.name, L"skse64_") || IStartsWith(m.e.name, L"sksevr_")) && m.e.name.size() > 7 &&
+                    iswdigit(m.e.name[7])) {
                     FileVer fv = GetFileVer(m.e.physPath);
                     // SKSE stamps its DLL as 0.major.minor.beta (2.2.6 -> 0.2.2.6); plugins request 2.2.x.
                     if (fv.ok)
