@@ -161,6 +161,8 @@ namespace hm
             w.S("stubReturns", p.stubReturns);
             w.S("evidenceKind", p.evidenceKind);
             w.S("location", p.location);
+            if (!p.origAsm.empty()) w.L("origAsm", p.origAsm);
+            if (!p.newAsm.empty()) w.L("newAsm", p.newAsm);
             w.Close('}');
         }
         w.Close(']');
@@ -296,6 +298,8 @@ namespace hm
                 p.stubReturns = o.GetStr("stubReturns");
                 p.evidenceKind = o.GetStr("evidenceKind");
                 p.location = o.GetStr("location");
+                p.origAsm = o.GetStrList("origAsm");
+                p.newAsm = o.GetStrList("newAsm");
                 r.patches.push_back(std::move(p));
             }
         if (auto a = v.Get("conflicts"); a && a->type == json::Value::kArray)
@@ -467,6 +471,13 @@ details.mrec:target{outline:2px solid var(--accent)}
 .bytes b{color:var(--ink);font-weight:500}
 .hid{display:none!important}
 ul.notes{margin:6px 0;padding-left:20px;color:var(--mute)}
+.chip.cat{background:var(--infoBg);color:var(--ink);font-weight:500}
+.legend{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px 14px;margin:0 0 10px;font-size:13px}
+.legend .kv{margin-top:8px}
+details.asm{margin-top:6px}details.asm>summary{font-size:12px;color:var(--accent)}
+.asmg{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px;min-width:440px}
+.asmg pre{margin:2px 0 0;font-family:var(--mono);font-size:11.5px;line-height:1.45;white-space:pre;overflow-x:auto;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+td.len{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
 .empty{color:var(--mute);background:var(--panel);border:1px dashed var(--line);border-radius:8px;padding:14px}
 @media (max-width:640px){.meta,.kv{grid-template-columns:1fr}.meta dt,.kv dt{margin-top:6px}}
 )CSS";
@@ -503,6 +514,45 @@ ul.notes{margin:6px 0;padding-left:20px;color:var(--mute)}
             if (m.compatStatus == "warn") return "<span class=\"chip med\">check</span>";
             return "";
         }
+
+        // Plain-English label for each kind of finding, shown as a chip on every conflict.
+        const char* CategoryLabel(const std::string& c)
+        {
+            if (c == "clobber") return "overwritten hook";
+            if (c == "overlap") return "overlapping patches";
+            if (c == "shared-site") return "chained hook";
+            if (c == "near") return "nearby patches · unverified";
+            if (c == "same-function") return "same function, separate patches";
+            if (c == "entry-detour") return "calls a detoured function";
+            if (c == "cross-module") return "patches another DLL";
+            if (c == "iat") return "import hook";
+            if (c == "veh") return "exception-API import";
+            if (c == "compat") return "version mismatch";
+            if (c == "skse-log") return "SKSE log";
+            if (c == "orphan") return "orphaned stub";
+            if (c == "scan") return "scan note";
+            if (c == "unattributed") return "unattributed patches";
+            return "";
+        }
+
+        const char* kLegend =
+            "<details class=legend><summary>What the labels mean</summary><dl class=kv>"
+            "<dt><span class=\"chip cat\">overwritten hook</span></dt><dd>One DLL replaced another DLL's hook at the same spot. "
+            "Proven by the earlier hook's trampoline, which still holds that spot's original bytes but is no longer reached. "
+            "The earlier hook doesn't run.</dd>"
+            "<dt><span class=\"chip cat\">overlapping patches</span></dt><dd>Two patches share bytes but start at different "
+            "instructions, so they can't chain. At least one of them is partly broken.</dd>"
+            "<dt><span class=\"chip cat\">chained hook</span></dt><dd>Several DLLs hook the same spot and each calls through to the "
+            "next. Both run; load order decides which goes first. Usually fine.</dd>"
+            "<dt><span class=\"chip cat\">nearby patches · unverified</span></dt><dd>Patches within a few bytes of each other that "
+            "share no bytes. Nothing is overwritten now; HookMap can't verify they stay compatible if either DLL changes.</dd>"
+            "<dt><span class=\"chip cat\">same function, separate patches</span></dt><dd>Different places in one function, no shared "
+            "bytes. A crowded function, not a collision.</dd>"
+            "<dt><span class=\"chip cat\">calls a detoured function</span></dt><dd>A hook calls a game function another DLL has "
+            "detoured. Both run.</dd>"
+            "<dt><span class=\"chip cat\">exception-API import</span></dt><dd>The DLL imports a vectored-exception API. "
+            "Informational: importing it doesn't prove a handler is registered.</dd>"
+            "</dl></details>";
 
         std::string ListText(const std::vector<std::string>& v)
         {
@@ -561,10 +611,12 @@ ul.notes{margin:6px 0;padding-left:20px;color:var(--mute)}
 
         // ---------------- conflicts
         h += "<h2 id=conflicts>Conflicts, ranked</h2>";
+        h += kLegend;
         if (r.conflicts.empty()) h += "<div class=empty>No conflicts found.</div>";
         for (auto& c : r.conflicts) {
             h += std::string("<div class=\"cf f ") + SevClass(c.severity) + (c.expected ? " exp-row" : "") + "\">";
             h += std::string("<span class=\"chip ") + SevClass(c.severity) + "\">" + SeverityName(c.severity) + "</span> ";
+            if (const char* lbl = CategoryLabel(c.category); *lbl) h += std::string("<span class=\"chip cat\">") + lbl + "</span> ";
             if (c.expected) h += "<span class=\"chip exp\">expected</span> ";
             h += "<span class=t>" + E(c.title) + "</span>";
             if (!c.detail.empty()) h += "<div class=d>" + E(c.detail) + "</div>";
@@ -606,16 +658,19 @@ ul.notes{margin:6px 0;padding-left:20px;color:var(--mute)}
             for (auto p : list) owners[p->owner]++;
             h += std::string("<details class=grp") + (mod == gameMod ? " open" : "") + "><summary><span class=name>" + E(mod) +
                  "</span><span class=mute>" + std::to_string(list.size()) + " patch(es) · " + std::to_string(owners.size()) +
-                 " owner(s)</span></summary><div class=tw><table><thead><tr><th>#</th><th>Location</th><th>Kind</th><th>Owner</th>"
-                 "<th>Chain</th><th>Bytes (original → now)</th></tr></thead><tbody>";
+                 " owner(s)</span></summary><div class=tw><table><thead><tr><th>#</th><th>Location / address</th><th>Kind</th>"
+                 "<th>Length</th><th>Owner</th><th>Destination</th><th>Chain</th><th>Bytes and instructions (original → now)</th>"
+                 "</tr></thead><tbody>";
             auto row = [&](const PatchRec* p) {
                 bool bad = !p->victims.empty();
                 std::string t = std::string("<tr class=\"f") + (bad ? " bad" : "") + "\" id=\"p-" + std::to_string(p->id) + "\">";
                 t += "<td class=mono>" + std::to_string(p->id) + "</td>";
-                t += "<td><div>" + E(p->location) + "</div><div class=\"mono mute\">+" + E(Hex(p->rva)) + "</div></td>";
+                t += "<td><div>" + E(p->location) + "</div><div class=\"mono mute\">" + E(p->inModule) + "+" + E(Hex(p->rva)) +
+                     "</div></td>";
                 t += "<td>" + E(p->kind) + (p->kindNote.empty() ? "" : "<div class=mute>" + E(p->kindNote) + "</div>") + "</td>";
-                t += "<td>" + ModLink(p->owner) + "<div class=mute>" + E(p->ownerHow) + "</div>" +
-                     (p->target.empty() ? "" : "<div class=\"mono mute\">→ " + E(p->target) + "</div>") + "</td>";
+                t += "<td class=len>" + std::to_string(p->len) + (p->len == 1 ? " byte" : " bytes") + "</td>";
+                t += "<td>" + ModLink(p->owner) + "<div class=mute>" + E(p->ownerHow) + "</div></td>";
+                t += "<td class=mono>" + (p->target.empty() ? std::string("<span class=mute>—</span>") : E(p->target)) + "</td>";
                 t += "<td>";
                 if (!p->chainStatus.empty()) t += E(p->chainStatus);
                 if (p->chain.size() >= 2) t += "<div class=mute>" + E(ListText(p->chain)) + " → original</div>";
@@ -629,7 +684,18 @@ ul.notes{margin:6px 0;padding-left:20px;color:var(--mute)}
                 if (!p->otherRefs.empty())
                     t += "<div class=mute>also references original (not evidence of a conflict): " + E(ListText(p->otherRefs)) + "</div>";
                 t += "</td>";
-                t += "<td><div class=bytes>" + E(p->origBytes) + "<br>→ <b>" + E(p->newBytes) + "</b></div></td>";
+                t += "<td><div class=bytes>" + E(p->origBytes) + "<br>→ <b>" + E(p->newBytes) + "</b></div>";
+                if (!p->origAsm.empty() || !p->newAsm.empty()) {
+                    auto lines = [&](const std::vector<std::string>& v) {
+                        std::string s;
+                        for (auto& x : v) s += (s.empty() ? "" : "\n") + E(x);
+                        return s.empty() ? std::string("<span class=mute>(no clean copy to compare)</span>") : s;
+                    };
+                    t += "<details class=asm><summary>instructions</summary><div class=asmg><div><div class=mute>original</div><pre>" +
+                         lines(p->origAsm) + "</pre></div><div><div class=mute>now</div><pre>" + lines(p->newAsm) +
+                         "</pre></div></div></details>";
+                }
+                t += "</td>";
                 t += "</tr>";
                 return t;
             };
@@ -662,7 +728,7 @@ ul.notes{margin:6px 0;padding-left:20px;color:var(--mute)}
                     slots.insert(q->location.substr(pos + 6, end == std::string::npos ? std::string::npos : end - pos - 6));
                 }
                 std::string slotText = slots.size() == 1 && *slots.begin() != "?" ? "slot " + *slots.begin() : "several slots";
-                h += "<tr class=f><td colspan=6><details><summary><b>" + std::to_string(g.size()) + " vtables, " + E(slotText) +
+                h += "<tr class=f><td colspan=8><details><summary><b>" + std::to_string(g.size()) + " vtables, " + E(slotText) +
                      "</b> — was " + E(key.second) + ", now " + ModLink(key.first) + " <span class=mute>(" + E(g.front()->chainStatus) +
                      ")</span></summary><div class=tw><table><tbody>";
                 for (auto q : g) h += row(q);

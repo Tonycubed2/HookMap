@@ -47,12 +47,14 @@ DLLs that patch heavily by design (SKSE, Engine Fixes, overlays…). Findings th
 - Byte patches are attributed by finding the patch bytes in a DLL's data.
 - Chain analysis: checks whether a hook's owner calls the original, or chains to another hook through its trampoline.
 - An "overwrote" or "overlap" verdict needs site-specific evidence: the earlier hook's trampoline, holding that site's original bytes and jumping back to it, stored by that DLL but no longer reached. A DLL that merely holds the original function's address is listed as a reference, never as a victim.
+- Decodes the instructions each code patch touches, as they are in the file and as they are now (Zydis), and shows each patch's address, length and destination.
+- Labels every finding by kind: overwritten hook, overlapping patches, chained hook, nearby patches (compatibility unverified), same function, and so on. Nearby patches and exception-API imports are informational, not conflicts.
 - Reads each SKSE plugin's version data, the PE headers (Rich header, imports, debug info) and `skse64.log`.
 - Names locations via Address Library IDs (SE `.bin`, AE `.bin` or VR `.csv`, matching the running game) and, if `CommonLibSSEPath_NG` is set, names harvested from CommonLibSSE-NG sources.
 
 ## Building
 
-Requirements: Visual Studio 2022 (C++ workload), CMake 3.21+, Ninja. No other dependencies.
+Requirements: Visual Studio 2022 (C++ workload), CMake 3.21+, Ninja, Git. The first configure downloads [Zydis](https://github.com/zyantific/zydis) (MIT), the disassembler HookMap uses, so it needs an internet connection once.
 
 From a Developer Command Prompt:
 

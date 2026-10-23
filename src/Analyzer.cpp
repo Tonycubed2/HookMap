@@ -254,6 +254,7 @@ namespace hm
             void ReadSkseLog();
             void BuildConflicts();
             int  AddPatch(PatchRec rec, PInfo info);
+            void FillAsm(const Mod& m, const std::vector<uint8_t>* disk, PatchRec& rec) const;
             const std::vector<int>& Neighbors(int m);
         };
 
@@ -1139,6 +1140,7 @@ namespace hm
                 info.noBaseline = true;
                 info.hops = res.hops;
                 info.thunkRefs = res.thunkRefs;
+                FillAsm(m, nullptr, rec);
                 AddPatch(std::move(rec), std::move(info));
                 --budget;
                 i += len + (uint32_t)pad;
@@ -1293,6 +1295,7 @@ namespace hm
                         if (info.detour && rec.kind != "flow") rec.kindNote += std::string(rec.kindNote.empty() ? "" : "; ") +
                                                                                "detour over original instructions";
                     }
+                    FillAsm(m, &disk, rec);
                     AddPatch(std::move(rec), std::move(info));
                     --budget;
                     cursor = after + (uint32_t)pad;
@@ -1320,10 +1323,28 @@ namespace hm
                 rec.ownerHow = "unknown";
                 info.site = m.e.base + cursor;
                 info.newBytes.assign(mem.begin() + cursor, mem.begin() + b);
+                FillAsm(m, &disk, rec);
                 AddPatch(std::move(rec), std::move(info));
                 --budget;
                 break;
             }
+        }
+
+        // Decodes the instructions a code patch touches, before (file on disk) and now (memory), starting at the
+        // instruction boundary found by decoding forward from the enclosing function's start.
+        void Engine::FillAsm(const Mod& m, const std::vector<uint8_t>* disk, PatchRec& rec) const
+        {
+            if (!rec.len || rec.rva >= m.img.size()) return;
+            const uint32_t rva = (uint32_t)rec.rva;
+            const uint64_t site = m.e.base + rva;
+            uint32_t from = rva;
+            auto it = std::upper_bound(m.funcStarts.begin(), m.funcStarts.end(), site);
+            if (it != m.funcStarts.begin() && site - *std::prev(it) <= 0x8000) from = (uint32_t)(*std::prev(it) - m.e.base);
+            const uint8_t* orig = disk && rva < disk->size() ? disk->data() : nullptr;
+            const size_t   origSize = orig ? disk->size() : 0;
+            const uint32_t start = orig ? InsnBoundary(orig, origSize, from, rva) : InsnBoundary(m.img.data(), m.img.size(), from, rva);
+            if (orig) rec.origAsm = DisasmCover(orig, origSize, m.e.base, start, rva, rec.len);
+            rec.newAsm = DisasmCover(m.img.data(), m.img.size(), m.e.base, start, rva, rec.len);
         }
 
         void Engine::ScanRdata(int mi, const std::vector<uint8_t>& disk, const PESection& sec, size_t& budget)
@@ -2125,17 +2146,19 @@ namespace hm
                         } else if (q.rva >= pEnd && q.rva - pEnd < 16 && p.owner != q.owner &&
                                    (p.owner != kUnattributed || q.owner != kUnattributed)) {
                             ConflictRec c;
-                            c.severity = kMedium;
+                            c.severity = kLow;
                             c.category = "near";
                             uint64_t gap = q.rva - pEnd;
                             std::string gapText = gap == 0 ? std::string("right next to each other")
                                                            : std::to_string(gap) + (gap == 1 ? " byte apart" : " bytes apart");
-                            c.title = "Patches " + gapText + " at " + siteText(p) + ": " + p.owner + " and " + q.owner;
+                            c.title = "Nearby patches, compatibility unverified: " + p.owner + " and " + q.owner + ", " + gapText + " at " +
+                                      siteText(p);
                             c.detail = p.inModule + "+" + Hex(p.rva) + " (" + std::to_string(p.len) + " bytes, " + p.owner + ") " +
                                        (gap == 0 ? std::string("ends exactly where +") + Hex(q.rva) + " (" + q.owner + ") starts"
                                                  : "ends " + gapText.substr(0, gapText.size() - 6) + " before +" + Hex(q.rva) + " (" +
                                                        q.owner + ")") +
-                                       ". They don't share bytes, but a later update that hooks a slightly longer range would collide.";
+                                       ". They don't share any bytes, so neither has overwritten the other. HookMap can't verify that they "
+                                       "stay compatible: if either DLL changes to overwrite a slightly longer range, they would collide.";
                             c.modules = { p.owner, q.owner };
                             c.patches = { p.id, q.id };
                             c.key = "near|" + p.inModule + "|" + Hex(p.rva) + "|" + Hex(q.rva);
@@ -2271,13 +2294,14 @@ namespace hm
                 if (m.registersVeh && !m.windows && !kNotGuards.count(Lower(m.e.name))) veh.push_back(W2U(m.e.name));
             if (veh.size() >= 2) {
                 ConflictRec c;
-                c.severity = kMedium;
+                c.severity = kInfo;
                 c.category = "veh";
-                c.title = std::to_string(veh.size()) + " DLLs import a vectored-exception API (not proof a handler is registered)";
+                c.title = std::to_string(veh.size()) + " DLLs import a vectored-exception API (informational: not proof a handler is registered)";
                 c.detail = "Each of these can register a handler that sees (and can swallow or \"fix\") a crash before the others "
                            "and before Crash Logger. Stacked guards can turn a clean crash into a freeze or a later, "
                            "unrelated-looking crash. Whether each one actually registers a handler, and in what order, can't be "
-                           "read from outside the process: " + modsText(veh) + ".";
+                           "read from outside the process: " + modsText(veh) + ". Listed for information only: importing the "
+                           "API is not evidence of a problem.";
                 c.modules = veh;
                 c.key = "veh|" + modsText(veh);
                 out.push_back(std::move(c));

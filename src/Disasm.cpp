@@ -1,5 +1,7 @@
 #include "Disasm.h"
 
+#include <Zydis/Zydis.h>
+
 namespace hm
 {
     static int32_t Rd32(const uint8_t* p)
@@ -119,5 +121,78 @@ namespace hm
             break;
         }
         return i;
+    }
+
+    // ---------------------------------------------------------------- Zydis
+
+    namespace
+    {
+        struct Zy
+        {
+            ZydisDecoder   dec{};
+            ZydisFormatter fmt{};
+            Zy()
+            {
+                ZydisDecoderInit(&dec, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
+                ZydisFormatterInit(&fmt, ZYDIS_FORMATTER_STYLE_INTEL);
+            }
+        };
+
+        const Zy& Z()
+        {
+            static const Zy z;
+            return z;
+        }
+    }
+
+    uint32_t InsnBoundary(const uint8_t* image, size_t size, uint32_t from, uint32_t rva)
+    {
+        if (!image || rva >= size || from > rva || rva - from > 0x8000) return rva;
+        uint32_t at = from;
+        while (at <= rva) {
+            ZydisDecodedInstruction ins;
+            if (!ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&Z().dec, nullptr, image + at, size - at, &ins))) return rva;
+            if (at + ins.length > rva) return at;
+            at += ins.length;
+        }
+        return rva;
+    }
+
+    std::vector<std::string> DisasmCover(const uint8_t* image, size_t size, uint64_t base, uint32_t start, uint32_t rva,
+        uint32_t len, size_t maxLines)
+    {
+        std::vector<std::string> out;
+        if (!image || start >= size) return out;
+        const uint64_t end = (uint64_t)rva + len;
+        uint32_t at = start;
+        while (at < end && at < size) {
+            if (out.size() >= maxLines) {
+                out.push_back("…");
+                break;
+            }
+            std::string addr = "+" + Hex(at) + "  ";
+            // jmp [rip+0] ; dq target   (14-byte absolute jump: show the pointer as data, not as instructions)
+            if (at + 14 <= size && image[at] == 0xFF && image[at + 1] == 0x25 && Rd32(image + at + 2) == 0) {
+                out.push_back(addr + "jmp qword ptr [rip+0]");
+                out.push_back("+" + Hex(at + 6) + "  dq " + Hex(Rd64(image + at + 6)));
+                at += 14;
+                continue;
+            }
+            ZydisDecodedInstruction ins;
+            ZydisDecodedOperand     ops[ZYDIS_MAX_OPERAND_COUNT];
+            char                    text[256];
+            if (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&Z().dec, image + at, size - at, &ins, ops)) &&
+                ZYAN_SUCCESS(ZydisFormatterFormatInstruction(&Z().fmt, &ins, ops, ins.operand_count_visible, text, sizeof(text),
+                    base + at, nullptr))) {
+                out.push_back(addr + text);
+                at += ins.length;
+            } else {
+                char db[16];
+                snprintf(db, sizeof(db), "db 0x%02X", image[at]);
+                out.push_back(addr + db + "  (doesn't decode)");
+                at += 1;
+            }
+        }
+        return out;
     }
 }

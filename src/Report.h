@@ -62,6 +62,8 @@ namespace hm
         std::string stubReturns;   // where it jumps back to
         std::string evidenceKind;  // "clobber" / "overlap"
         std::string location;   // ID / name / vtable slot / export
+        std::vector<std::string> origAsm;  // instructions the patch touched, as they are in the file on disk
+        std::vector<std::string> newAsm;   // the same bytes as they are in memory now
         std::string Key() const;
     };
 

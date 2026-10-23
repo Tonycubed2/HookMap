@@ -31,4 +31,15 @@ namespace hm
 
     // Length of a NOP / INT3 padding run at p (0 if p doesn't start with padding).
     size_t PaddingLen(const uint8_t* p, size_t avail);
+
+    // ---- full x86-64 decoding (Zydis), used to show the instructions a patch touches
+
+    // Start of the instruction that contains `rva`, found by decoding forward from `from` (a function start).
+    // Returns `rva` when the bytes in between don't decode cleanly or `from` is too far back.
+    uint32_t InsnBoundary(const uint8_t* image, size_t size, uint32_t from, uint32_t rva);
+
+    // Decodes from `start` until the instructions cover [rva, rva + len). One line per instruction,
+    // "+0x1234  call 0x7FF6AB001000" (targets as absolute addresses, using `base`).
+    std::vector<std::string> DisasmCover(const uint8_t* image, size_t size, uint64_t base, uint32_t start, uint32_t rva,
+        uint32_t len, size_t maxLines = 16);
 }
