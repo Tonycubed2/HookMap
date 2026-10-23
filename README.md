@@ -26,6 +26,15 @@ HookMap.exe --render HookMap_old.json
 
 Run `HookMap.exe --help` for all options.
 
+### Danger levels
+
+The top of the report rates four process-wide risks green / yellow / red. The overall rating is the worst of the four, not an average.
+
+- **Hook collisions**: red for any clobbered or high conflict, yellow for medium.
+- **Near memory (trampolines)**: free address space within 2 GB of the game exe, where every hook trampoline has to live. Rated on the largest free block, because fragmentation is what makes a plugin fail to get its trampoline.
+- **TLS slots**: `TlsAlloc` slots used out of 1088, read exactly from the game process. Shared by the game, Windows, overlays and every DLL.
+- **Static CRT (FLS slots)**: DLLs built with the static CRT each use about 2 Fiber Local Storage slots. The limit is 4080 on Windows 10 1903 and later (128 before), so on current Windows this is informational.
+
 ### allowlist.txt
 
 DLLs that patch heavily by design (SKSE, Engine Fixes, overlays…). Findings that only involve allowlisted DLLs are marked *expected* and ranked lower. One DLL name per line, wildcards allowed, optional note after `|`.

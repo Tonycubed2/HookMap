@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(HookMap VERSION 1.3.0 LANGUAGES CXX)
+project(HookMap VERSION 1.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,6 +19,7 @@ add_executable(HookMap
     src/Report.cpp
     src/Json.cpp
     src/SteamStub.cpp
+    src/Health.cpp
 )
 
 target_compile_definitions(HookMap PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS PSAPI_VERSION=2)

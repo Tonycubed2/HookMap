@@ -1,5 +1,6 @@
 #include "Analyzer.h"
 #include "Common.h"
+#include "Health.h"
 #include "Process.h"
 #include "Report.h"
 
@@ -195,6 +196,7 @@ namespace
         Report rep;
         std::vector<std::pair<std::wstring, std::wstring>> repl;
         Analyze(proc, o, rep, repl);
+        ScanHealth(proc, rep);
         if (share) Sanitize(rep, repl);
 
         std::wstring base = OutDir(o) + L"\\HookMap_" + U2W(NowFileStamp()) + (share ? L"_share" : L"");
@@ -206,6 +208,7 @@ namespace
         for (auto& x : rep.conflicts)
             if (!x.expected) c[std::clamp(x.severity, 0, 3)]++;
         printf("\n%zu patches mapped. Conflicts: %d high, %d medium, %d low.\n", rep.patches.size(), c[kHigh], c[kMedium], c[kLow]);
+        PrintHealth(rep.health);
         if (okH) printf("Report: %s\n", W2U(htmlPath).c_str());
         else printf("Could not write %s\n", W2U(htmlPath).c_str());
         if (okJ) printf("Data:   %s\n", W2U(jsonPath).c_str());

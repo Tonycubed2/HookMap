@@ -27,6 +27,7 @@ namespace hm
 
         bool Open(DWORD pid, DWORD& lastError);
         DWORD Pid() const { return pid_; }
+        HANDLE Handle() const { return h_; }
 
         std::vector<ModuleEntry> Modules() const;
 

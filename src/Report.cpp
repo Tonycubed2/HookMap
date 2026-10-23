@@ -1,5 +1,6 @@
 #include "Report.h"
 
+#include "Health.h"
 #include "Json.h"
 
 namespace hm
@@ -181,6 +182,30 @@ namespace hm
             w.Close('}');
         }
         w.Close(']');
+
+        w.Key("health");
+        w.Open('{');
+        w.B("scanned", r.health.scanned);
+        w.S("overall", r.health.overall);
+        w.S("windows", r.health.windows);
+        w.Key("gauges");
+        w.Open('[');
+        for (auto& g : r.health.gauges) {
+            w.Sep();
+            w.out += "\n";
+            w.Open('{');
+            w.S("id", g.id);
+            w.S("name", g.name);
+            w.S("level", g.level);
+            w.S("value", g.value);
+            w.S("detail", g.detail);
+            w.S("advice", g.advice);
+            w.L("items", g.items);
+            w.Close('}');
+        }
+        w.Close(']');
+        w.Close('}');
+
         w.Close('}');
         w.out += "\n";
         return w.out;
@@ -288,6 +313,23 @@ namespace hm
                 c.key = o.GetStr("key");
                 r.conflicts.push_back(std::move(c));
             }
+        if (auto hv = v.Get("health"); hv && hv->type == json::Value::kObject) {
+            r.health.scanned = hv->GetBool("scanned");
+            r.health.overall = hv->GetStr("overall");
+            r.health.windows = hv->GetStr("windows");
+            if (auto a = hv->Get("gauges"); a && a->type == json::Value::kArray)
+                for (auto& o : a->arr) {
+                    GaugeRec g;
+                    g.id = o.GetStr("id");
+                    g.name = o.GetStr("name");
+                    g.level = o.GetStr("level");
+                    g.value = o.GetStr("value");
+                    g.detail = o.GetStr("detail");
+                    g.advice = o.GetStr("advice");
+                    g.items = o.GetStrList("items");
+                    r.health.gauges.push_back(std::move(g));
+                }
+        }
         return true;
     }
 
@@ -511,8 +553,11 @@ ul.notes{margin:6px 0;padding-left:20px;color:var(--mute)}
 
         h += "<div class=bar><input id=q type=search placeholder=\"Filter everything — a DLL name, an ID, a function…\" aria-label=Filter>"
              "<label><input id=he type=checkbox> hide expected</label>"
-             "<nav><a href=\"#conflicts\">Conflicts</a><a href=\"#hooks\">Hook map</a><a href=\"#veh\">Exception handlers</a>"
+             "<nav>" + std::string(r.health.scanned ? "<a href=\"#danger\">Danger levels</a>" : "") + "<a href=\"#conflicts\">Conflicts</a><a href=\"#hooks\">Hook map</a><a href=\"#veh\">Exception handlers</a>"
              "<a href=\"#modules\">Modules</a><a href=\"#info\">Scan info</a></nav></div>";
+
+        // ---------------- danger levels
+        h += HealthHtml(r.health);
 
         // ---------------- conflicts
         h += "<h2 id=conflicts>Conflicts, ranked</h2>";

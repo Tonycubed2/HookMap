@@ -77,6 +77,26 @@ namespace hm
         std::string key;
     };
 
+    // One danger gauge (static CRT, TLS, near memory, hooks).
+    struct GaugeRec
+    {
+        std::string id;      // crt / tls / near / hooks
+        std::string name;
+        std::string level;   // green / yellow / red / gray (not measured)
+        std::string value;   // headline number
+        std::string detail;  // plain-English explanation
+        std::string advice;  // what to do about it
+        std::vector<std::string> items;
+    };
+
+    struct HealthRec
+    {
+        bool        scanned = false;
+        std::string overall;   // worst gauge level
+        std::string windows;   // "Windows 11 build 26100"
+        std::vector<GaugeRec> gauges;
+    };
+
     struct Report
     {
         std::string tool = kToolName, toolVersion = kToolVersion;
@@ -87,6 +107,7 @@ namespace hm
         std::vector<ModuleRec>   modules;
         std::vector<PatchRec>    patches;
         std::vector<ConflictRec> conflicts;
+        HealthRec                health;
     };
 
     // Output

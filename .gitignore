@@ -11,3 +11,7 @@ HookMap_Diff_*.html
 
 # release zips
 *.zip
+
+# local build helper and its log
+claude-build.cmd
+claude-build.log
